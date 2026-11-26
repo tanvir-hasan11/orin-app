@@ -36,14 +36,22 @@ class KeyStoreManager(context: Context) {
     fun activeProviderId(): String = getSecret("active_provider") ?: "gemini"
     fun setActiveProviderId(id: String) = putSecret("active_provider", id)
 
-    fun activeModel(): String = getSecret("active_model") ?: when (activeProviderId()) {
+    fun defaultModel(provider: String): String = when (provider) {
         "anthropic" -> "claude-sonnet-4-20250514"
         "openai" -> "gpt-4o"
         "deepseek" -> "deepseek-chat"
         else -> "gemini-2.5-flash"
     }
 
+    fun activeModel(): String = getSecret("active_model") ?: defaultModel(activeProviderId())
+
     fun setActiveModel(model: String) = putSecret("active_model", model)
+
+    fun hasApiKey(): Boolean = getSecret("api_key_${activeProviderId()}") != null
+
+    fun shellEnabled(): Boolean = getSecret("shell_enabled") != "false"
+
+    fun setShellEnabled(enabled: Boolean) = putSecret("shell_enabled", enabled.toString())
 
     fun biometricGateEnabled(): Boolean = getSecret("biometric_gate") == "true"
     fun setBiometricGateEnabled(enabled: Boolean) = putSecret("biometric_gate", enabled.toString())

@@ -62,7 +62,9 @@ fun OrinCodeScreen(
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val shellTool = remember(context) { WorkspaceShellTool(context, runtime.db.dao()) }
+    val shellTool = remember(context, runtime.keys) {
+        WorkspaceShellTool(context, runtime.db.dao(), runtime.keys)
+    }
     val fileTool = remember(context) { FileOpsTool(context) }
 
     var command by remember { mutableStateOf("") }

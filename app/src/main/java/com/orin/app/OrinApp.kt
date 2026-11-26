@@ -32,7 +32,7 @@ class OrinApp : Application() {
             registerTool(tracker)
             registerTool(brief)
             registerTool(FileOpsTool(this@OrinApp))
-            registerTool(WorkspaceShellTool(this@OrinApp, db.dao()))
+            registerTool(WorkspaceShellTool(this@OrinApp, db.dao(), keys))
             registerTool(WebFetchTool())
         }
     }

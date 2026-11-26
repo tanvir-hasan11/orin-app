@@ -19,10 +19,15 @@ import kotlinx.serialization.json.putJsonObject
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 class MetaAdsTool(
     private val keys: KeyStoreManager,
-    private val http: OkHttpClient = OkHttpClient(),
+    private val http: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
+        .build(),
 ) : OrinTool {
     override val name = "meta_ads"
     override val description = "Inspect Meta (Facebook/Instagram) Ads insights ('insights', date_preset: today/yesterday/last_7d) or campaigns ('campaigns')."
@@ -37,32 +42,50 @@ class MetaAdsTool(
 
     override suspend fun execute(args: JsonObject): String = withContext(Dispatchers.IO) {
         val token = keys.getSecret("meta_ads_token")
-            ?: return@withContext "Meta Ads token not configured. Add it in Settings -> Phone Bridge & Meta Ads."
+            ?: return@withContext "Meta Ads token not configured. Add it in Settings → Meta Ads."
         var accountId = keys.getSecret("meta_ad_account_id")
-            ?: return@withContext "Meta Ad Account ID not configured. Add it in Settings -> Phone Bridge & Meta Ads."
+            ?: return@withContext "Meta Ad Account ID not configured. Add it in Settings → Meta Ads."
         if (!accountId.startsWith("act_")) accountId = "act_$accountId"
 
         val action = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "insights"
         val preset = args["date_preset"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "yesterday"
 
         val url = if (action == "campaigns") {
-            "https://graph.facebook.com/v21.0/$accountId/campaigns?fields=name,status,daily_budget&limit=15&access_token=$token"
+            "https://graph.facebook.com/v21.0/$accountId/campaigns?fields=name,status,daily_budget&limit=25"
         } else {
-            "https://graph.facebook.com/v21.0/$accountId/insights?fields=spend,reach,impressions,clicks,cpc,ctr&date_preset=$preset&access_token=$token"
+            "https://graph.facebook.com/v21.0/$accountId/insights" +
+                "?fields=spend,reach,impressions,clicks,cpc,ctr&date_preset=$preset"
         }
 
-        val req = Request.Builder().url(url).get().build()
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+            .header("Accept", "application/json")
+            .get()
+            .build()
+
         runCatching {
-            http.newCall(req).execute().use { resp ->
-                val body = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return@use "Meta API HTTP ${resp.code}: ${body.take(250)}"
+            http.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    return@use when (response.code) {
+                        401, 403 -> "Meta token is invalid or expired (HTTP ${response.code}). Re-connect it in Settings."
+                        429 -> "Meta rate limit reached (HTTP 429). Try again shortly."
+                        else -> "Meta API HTTP ${response.code}: ${body.take(250)}"
+                    }
+                }
                 val data = json.parseToJsonElement(body).jsonObject["data"]?.jsonArray
                     ?: return@use "No data returned."
                 if (data.isEmpty()) return@use "No Meta Ads data for '$preset'."
                 if (action == "campaigns") {
-                    data.joinToString("\n") { el ->
-                        val o = el.jsonObject
-                        "• ${o["name"]?.jsonPrimitive?.contentOrNull} [${o["status"]?.jsonPrimitive?.contentOrNull}]"
+                    data.joinToString("\n") { element ->
+                        val campaign = element.jsonObject
+                        val budget = campaign["daily_budget"]?.jsonPrimitive?.contentOrNull
+                            ?.toDoubleOrNull()
+                            ?.let { " · daily $${"%.2f".format(it / 100)}" }
+                            .orEmpty()
+                        "• ${campaign["name"]?.jsonPrimitive?.contentOrNull} " +
+                            "[${campaign["status"]?.jsonPrimitive?.contentOrNull}]$budget"
                     }
                 } else {
                     val row = data.first().jsonObject
@@ -80,7 +103,7 @@ class MetaAdsTool(
 
 class PersonalTrackerTool(private val dao: OrinDao) : OrinTool {
     override val name = "personal_tracker"
-    override val description = "Manage Tanvir's personal tasks in Room DB ('add_task', 'list_tasks', 'complete_task')."
+    override val description = "Manage the user's personal tasks in the local database ('add_task', 'list_tasks', 'complete_task')."
     override val parameters = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -123,7 +146,7 @@ class MorningBriefTool(
     private val tracker: PersonalTrackerTool,
 ) : OrinTool {
     override val name = "morning_brief"
-    override val description = "Compile Tanvir's Executive Brief ('run' for Morning Brief, 'evening_wrap' for Evening Wrap-Up)."
+    override val description = "Compile the user's Executive Brief ('run' for Morning Brief, 'evening_wrap' for Evening Wrap-Up)."
     override val parameters = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -133,15 +156,19 @@ class MorningBriefTool(
 
     override suspend fun execute(args: JsonObject): String {
         val isEvening = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() == "evening_wrap"
-        val cal = calendar.execute(buildJsonObject { put("action", "list"); put("days", if (isEvening) "2" else "1") })
-        val ads = metaAds.execute(buildJsonObject { put("action", "insights"); put("date_preset", if (isEvening) "today" else "yesterday") })
+        val calendarText = calendar.execute(
+            buildJsonObject { put("action", "list"); put("days", if (isEvening) "2" else "1") },
+        )
+        val ads = metaAds.execute(
+            buildJsonObject { put("action", "insights"); put("date_preset", if (isEvening) "today" else "yesterday") },
+        )
         val tasks = tracker.execute(buildJsonObject { put("action", "list_tasks") })
 
         return buildString {
             appendLine(if (isEvening) "🌙 **Orin Evening Wrap-Up**" else "☀️ **Orin Morning Brief**")
             appendLine()
             appendLine("**Calendar:**")
-            appendLine(cal)
+            appendLine(calendarText)
             appendLine()
             appendLine("**Meta Ads:**")
             appendLine(ads)

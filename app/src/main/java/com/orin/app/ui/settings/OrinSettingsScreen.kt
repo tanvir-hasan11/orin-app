@@ -2,6 +2,11 @@
 
 package com.orin.app.ui.settings
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,25 +26,30 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
-import androidx.compose.material.icons.outlined.Memory
-import androidx.compose.material.icons.outlined.Mic
-import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,25 +57,48 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.orin.app.data.KeyStoreManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import com.orin.app.agent.OrinAgentRuntime
+import com.orin.app.util.OrinPermissions
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun OrinSettingsScreen(
-    keys: KeyStoreManager,
+    runtime: OrinAgentRuntime,
     onBack: () -> Unit,
+    onDataCleared: () -> Unit,
 ) {
+    val keys = runtime.keys
     val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var selectedProvider by remember { mutableStateOf(keys.activeProviderId()) }
     var apiKeyInput by remember { mutableStateOf(keys.getSecret("api_key_$selectedProvider").orEmpty()) }
     var modelInput by remember { mutableStateOf(keys.activeModel()) }
     var metaTokenInput by remember { mutableStateOf(keys.getSecret("meta_ads_token").orEmpty()) }
     var metaAccountInput by remember { mutableStateOf(keys.getSecret("meta_ad_account_id").orEmpty()) }
     var savedBanner by remember { mutableStateOf<String?>(null) }
+    var shellEnabled by remember { mutableStateOf(keys.shellEnabled()) }
+    var confirmClear by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
+    var permissionRefresh by remember { mutableIntStateOf(0) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { permissionRefresh++ }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { permissionRefresh++ }
 
     Scaffold(
         containerColor = scheme.background,
@@ -119,7 +152,7 @@ fun OrinSettingsScreen(
                                         selectedProvider = id
                                         keys.setActiveProviderId(id)
                                         apiKeyInput = keys.getSecret("api_key_$id").orEmpty()
-                                        modelInput = keys.activeModel()
+                                        modelInput = keys.defaultModel(id)
                                         savedBanner = null
                                     }
                                     .padding(horizontal = 12.dp, vertical = 6.dp),
@@ -138,6 +171,7 @@ fun OrinSettingsScreen(
                         label = "${selectedProvider.replaceFirstChar { it.uppercase() }} API Key",
                         value = apiKeyInput,
                         onValueChange = { apiKeyInput = it },
+                        secret = true,
                     )
 
                     Row(
@@ -146,7 +180,7 @@ fun OrinSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = savedBanner ?: "Stored securely in Android Keystore",
+                            text = savedBanner ?: "Stored in Android Keystore",
                             style = MaterialTheme.typography.labelSmall,
                             color = scheme.onSurfaceVariant,
                         )
@@ -156,7 +190,7 @@ fun OrinSettingsScreen(
                                 .background(scheme.primary)
                                 .clickable {
                                     keys.setActiveProviderId(selectedProvider)
-                                    keys.setActiveModel(modelInput.ifBlank { "gemini-2.5-flash" })
+                                    keys.setActiveModel(modelInput.trim().ifBlank { keys.defaultModel(selectedProvider) })
                                     keys.putSecret("api_key_$selectedProvider", apiKeyInput)
                                     savedBanner = "Saved for $selectedProvider"
                                 }
@@ -167,7 +201,48 @@ fun OrinSettingsScreen(
                     }
                 }
             }
+
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Shield, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text("Phone Permissions", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                    }
+                    OrinPermissions.groups.forEach { group ->
+                        val granted = remember(permissionRefresh, group.id) {
+                            OrinPermissions.isGranted(context, group)
+                        }
+                        PermissionRow(
+                            title = group.title,
+                            subtitle = if (granted) "Granted" else group.rationale,
+                            granted = granted,
+                            onAction = {
+                                if (granted) {
+                                    context.startActivity(
+                                        Intent(
+                                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.parse("package:${context.packageName}"),
+                                        ),
+                                    )
+                                } else {
+                                    permissionLauncher.launch(group.permissions.toTypedArray())
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
             item {
                 Column(
                     modifier = Modifier
@@ -178,10 +253,19 @@ fun OrinSettingsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.PhoneAndroid, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(10.dp))
-                        Text("Meta Ads & Phone Bridge", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                        Text("Meta Ads", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
                     }
-                    SettingsField(label = "Meta Ad Account ID (e.g. act_123...)", value = metaAccountInput, onValueChange = { metaAccountInput = it })
-                    SettingsField(label = "Meta Access Token", value = metaTokenInput, onValueChange = { metaTokenInput = it })
+                    SettingsField(
+                        label = "Meta Ad Account ID (e.g. act_123...)",
+                        value = metaAccountInput,
+                        onValueChange = { metaAccountInput = it },
+                    )
+                    SettingsField(
+                        label = "Meta Access Token",
+                        value = metaTokenInput,
+                        onValueChange = { metaTokenInput = it },
+                        secret = true,
+                    )
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
@@ -197,15 +281,83 @@ fun OrinSettingsScreen(
                     }
                 }
             }
+
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
-            item { SettingsRow(Icons.Outlined.Memory, "Local Offline Models", "On-device GGUF inference") }
+
+            item {
+                SettingsToggleRow(
+                    icon = Icons.Outlined.Terminal,
+                    title = "Workspace shell",
+                    subtitle = "Every command needs approval",
+                    checked = shellEnabled,
+                    onCheckedChange = {
+                        shellEnabled = it
+                        keys.setShellEnabled(it)
+                    },
+                )
+            }
+
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
-            item { SettingsRow(Icons.Outlined.Mic, "Voice & Speech", "Tap mic in chat for voice commands") }
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.Delete,
+                    title = "Clear all local data",
+                    subtitle = "Chats, tasks and audit log",
+                    onClick = { confirmClear = true },
+                )
+            }
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
-            item { SettingsRow(Icons.Outlined.Shield, "Security & Biometrics", "Encrypted Keystore + Action Audit Log active") }
-            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
-            item { SettingsRow(Icons.Outlined.Palette, "Appearance", "Warm Editorial Dark / Light") }
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.Info,
+                    title = "About Orin",
+                    subtitle = "Version 1.0.0 · Privacy",
+                    onClick = { showAbout = true },
+                )
+            }
         }
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Clear all local data?") },
+            text = {
+                Text("This deletes chats, tasks and the audit log. API keys remain in the Android Keystore.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmClear = false
+                        scope.launch {
+                            withContext(Dispatchers.IO) { runtime.db.clearAllTables() }
+                            onDataCleared()
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showAbout) {
+        AlertDialog(
+            onDismissRequest = { showAbout = false },
+            title = { Text("About Orin") },
+            text = {
+                Text(
+                    "Orin is a personal Android agent. Chat text is sent to the AI provider you select. " +
+                        "Calendar, contacts, SMS and Meta data are only read when a tool is called. " +
+                        "API keys and tokens are stored with Android Keystore encryption. " +
+                        "Orin never uploads your data to its own servers.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showAbout = false }) { Text("Close") }
+            },
+        )
     }
 }
 
@@ -214,8 +366,10 @@ private fun SettingsField(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
+    secret: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
+    var revealed by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -232,8 +386,23 @@ private fun SettingsField(
             textStyle = TextStyle(color = scheme.onSurface, fontSize = 14.sp),
             cursorBrush = SolidColor(scheme.primary),
             singleLine = true,
+            visualTransformation = if (secret && !revealed) {
+                PasswordVisualTransformation()
+            } else {
+                VisualTransformation.None
+            },
             modifier = Modifier.fillMaxWidth(),
         )
+        if (secret) {
+            Text(
+                text = if (revealed) "Hide" else "Show",
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.primary,
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .clickable { revealed = !revealed },
+            )
+        }
     }
 }
 
@@ -242,7 +411,7 @@ private fun SettingsRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
-    onClick: () -> Unit = {},
+    onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     Row(
@@ -257,6 +426,59 @@ private fun SettingsRow(
         Column {
             Text(title, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium), color = scheme.onSurface)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun SettingsToggleRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium), color = scheme.onSurface)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun PermissionRow(
+    title: String,
+    subtitle: String,
+    granted: Boolean,
+    onAction: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, color = scheme.onSurface)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (granted) scheme.primary else scheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onAction) {
+            Text(if (granted) "Manage" else "Allow")
         }
     }
 }

@@ -14,12 +14,12 @@ import android.provider.Telephony
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
 import com.orin.app.agent.OrinTool
+import com.orin.app.agent.ToolApprovalRequest
 import com.orin.app.data.AuditLogEntity
 import com.orin.app.data.OrinDao
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -49,12 +49,29 @@ class PhoneCalendarTool(private val context: Context) : OrinTool {
         "days" to "Number of days ahead to list (default 2).",
         "title" to "Event title for 'create'.",
         "description" to "Optional event description.",
+        "start_ms" to "Event start time in epoch milliseconds (optional, defaults to one hour from now).",
+        "end_ms" to "Event end time in epoch milliseconds (optional, defaults to start + one hour).",
     )
+
+    override fun approval(args: JsonObject): ToolApprovalRequest? {
+        val action = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list"
+        if (action != "create") return null
+        val title = args["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val start = startMillis(args)
+        val end = endMillis(args, start)
+        val formatter = eventFormatter()
+        return ToolApprovalRequest(
+            toolName = name,
+            title = "Create a calendar event?",
+            detail = "${title.ifBlank { "(no title)" }}\n" +
+                "${formatter.format(Instant.ofEpochMilli(start))} – ${formatter.format(Instant.ofEpochMilli(end))}",
+        )
+    }
 
     override suspend fun execute(args: JsonObject): String {
         val action = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list"
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
-            return "READ_CALENDAR permission not granted. Please allow Calendar access in Settings."
+            return "READ_CALENDAR permission not granted. Open Settings → Permissions to allow Calendar access."
         }
         return if (action == "create") createEvent(args) else listEvents(args)
     }
@@ -72,14 +89,14 @@ class PhoneCalendarTool(private val context: Context) : OrinTool {
             CalendarContract.Instances.BEGIN,
             CalendarContract.Instances.EVENT_LOCATION,
         )
-        val fmt = DateTimeFormatter.ofPattern("EEE MMM d, HH:mm").withZone(ZoneId.systemDefault())
+        val formatter = eventFormatter()
         val lines = mutableListOf<String>()
-        context.contentResolver.query(uri, projection, null, null, "${CalendarContract.Instances.BEGIN} ASC")?.use { c ->
-            while (c.moveToNext() && lines.size < 25) {
-                val title = c.getString(0) ?: "(No title)"
-                val begin = c.getLong(1)
-                val loc = c.getString(2)?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
-                lines.add("• ${fmt.format(Instant.ofEpochMilli(begin))} — $title$loc")
+        context.contentResolver.query(uri, projection, null, null, "${CalendarContract.Instances.BEGIN} ASC")?.use { cursor ->
+            while (cursor.moveToNext() && lines.size < 25) {
+                val title = cursor.getString(0) ?: "(No title)"
+                val begin = cursor.getLong(1)
+                val location = cursor.getString(2)?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
+                lines.add("• ${formatter.format(Instant.ofEpochMilli(begin))} — $title$location")
             }
         }
         return if (lines.isEmpty()) "No calendar events in the next $days day(s)." else lines.joinToString("\n")
@@ -87,31 +104,47 @@ class PhoneCalendarTool(private val context: Context) : OrinTool {
 
     private fun createEvent(args: JsonObject): String {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
-            return "WRITE_CALENDAR permission not granted."
+            return "WRITE_CALENDAR permission not granted. Open Settings → Permissions to allow Calendar access."
         }
         val title = args["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         if (title.isEmpty()) return "Event 'title' is required."
-        val startMs = System.currentTimeMillis() + 3_600_000L
-        val endMs = startMs + 3_600_000L
-        val calId = context.contentResolver.query(
-            CalendarContract.Calendars.CONTENT_URI,
-            arrayOf(CalendarContract.Calendars._ID),
-            "${CalendarContract.Calendars.VISIBLE} = 1",
-            null,
-            null,
-        )?.use { if (it.moveToFirst()) it.getLong(0) else null } ?: 1L
+        val start = startMillis(args)
+        val end = endMillis(args, start)
+
+        val calendarId = writableCalendarId()
+            ?: return "No writable calendar found. Add a calendar account or choose a writable calendar in the Calendar app."
 
         val values = ContentValues().apply {
-            put(CalendarContract.Events.CALENDAR_ID, calId)
+            put(CalendarContract.Events.CALENDAR_ID, calendarId)
             put(CalendarContract.Events.TITLE, title)
             put(CalendarContract.Events.DESCRIPTION, args["description"]?.jsonPrimitive?.contentOrNull.orEmpty())
-            put(CalendarContract.Events.DTSTART, startMs)
-            put(CalendarContract.Events.DTEND, endMs)
+            put(CalendarContract.Events.DTSTART, start)
+            put(CalendarContract.Events.DTEND, end)
             put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
         }
         val inserted = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
         return if (inserted != null) "Created calendar event: '$title'." else "Failed to create calendar event."
     }
+
+    private fun writableCalendarId(): Long? = context.contentResolver.query(
+        CalendarContract.Calendars.CONTENT_URI,
+        arrayOf(CalendarContract.Calendars._ID),
+        "${CalendarContract.Calendars.VISIBLE} = 1 AND ${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL} >= ?",
+        arrayOf(CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR.toString()),
+        "${CalendarContract.Calendars.IS_PRIMARY} DESC",
+    )?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+
+    private fun startMillis(args: JsonObject): Long =
+        args["start_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+            ?: (System.currentTimeMillis() + 3_600_000L)
+
+    private fun endMillis(args: JsonObject, start: Long): Long {
+        val requested = args["end_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+        return if (requested != null && requested > start) requested else start + 3_600_000L
+    }
+
+    private fun eventFormatter(): DateTimeFormatter =
+        DateTimeFormatter.ofPattern("EEE MMM d, HH:mm").withZone(ZoneId.systemDefault())
 }
 
 class PhoneContactsTool(private val context: Context) : OrinTool {
@@ -121,27 +154,30 @@ class PhoneContactsTool(private val context: Context) : OrinTool {
 
     override suspend fun execute(args: JsonObject): String {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            return "READ_CONTACTS permission not granted."
+            return "READ_CONTACTS permission not granted. Open Settings → Permissions to allow Contacts access."
         }
-        val query = args["query"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase().orEmpty()
+        val query = args["query"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         val projection = arrayOf(
             ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
             ContactsContract.CommonDataKinds.Phone.NUMBER,
         )
+        val selection = if (query.isEmpty()) null else
+            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? OR " +
+                "${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?"
+        val selectionArgs = if (query.isEmpty()) null else arrayOf("%$query%", "%$query%")
+
         val out = mutableListOf<String>()
         context.contentResolver.query(
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
             projection,
-            null,
-            null,
+            selection,
+            selectionArgs,
             "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC",
-        )?.use { c ->
-            while (c.moveToNext() && out.size < 20) {
-                val name = c.getString(0) ?: continue
-                val num = c.getString(1) ?: continue
-                if (query.isEmpty() || name.lowercase().contains(query) || num.contains(query)) {
-                    out.add("• $name: $num")
-                }
+        )?.use { cursor ->
+            while (cursor.moveToNext() && out.size < 20) {
+                val name = cursor.getString(0) ?: continue
+                val number = cursor.getString(1) ?: continue
+                out.add("• $name: $number")
             }
         }
         return if (out.isEmpty()) "No matching contacts found." else out.joinToString("\n")
@@ -150,13 +186,25 @@ class PhoneContactsTool(private val context: Context) : OrinTool {
 
 class PhoneSmsTool(private val context: Context, private val dao: OrinDao) : OrinTool {
     override val name = "phone_sms"
-    override val description = "Read recent SMS ('list', optional query) or send an SMS ('send', recipient, text)."
+    override val description = "Read recent SMS ('list', optional query) or send an SMS ('send', recipient, text). Sending always requires approval."
     override val parameters = objSchema(
         "action" to "One of: 'list' (default) or 'send'.",
         "query" to "Filter text or sender for 'list'.",
         "recipient" to "Destination phone number for 'send'.",
         "text" to "SMS body for 'send'.",
     )
+
+    override fun approval(args: JsonObject): ToolApprovalRequest? {
+        val action = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list"
+        if (action != "send") return null
+        val recipient = args["recipient"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val text = args["text"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        return ToolApprovalRequest(
+            toolName = name,
+            title = "Send this SMS?",
+            detail = "To: ${recipient.ifBlank { "(missing number)" }}\n\n${text.ifBlank { "(empty message)" }}",
+        )
+    }
 
     override suspend fun execute(args: JsonObject): String {
         val action = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list"
@@ -165,25 +213,27 @@ class PhoneSmsTool(private val context: Context, private val dao: OrinDao) : Ori
 
     private fun listSms(args: JsonObject): String {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
-            return "READ_SMS permission not granted."
+            return "READ_SMS permission not granted. Open Settings → Permissions to allow SMS access."
         }
-        val query = args["query"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()
-        val fmt = DateTimeFormatter.ofPattern("MMM d HH:mm").withZone(ZoneId.systemDefault())
+        val query = args["query"]?.jsonPrimitive?.contentOrNull?.trim()
+        val formatter = DateTimeFormatter.ofPattern("MMM d HH:mm").withZone(ZoneId.systemDefault())
+        val selection = if (query.isNullOrBlank()) null else
+            "${Telephony.Sms.ADDRESS} LIKE ? OR ${Telephony.Sms.BODY} LIKE ?"
+        val selectionArgs = if (query.isNullOrBlank()) null else arrayOf("%$query%", "%$query%")
+
         val out = mutableListOf<String>()
         context.contentResolver.query(
             Telephony.Sms.CONTENT_URI,
             arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE),
-            null,
-            null,
+            selection,
+            selectionArgs,
             "${Telephony.Sms.DATE} DESC",
-        )?.use { c ->
-            while (c.moveToNext() && out.size < 15) {
-                val addr = c.getString(0) ?: "Unknown"
-                val body = c.getString(1) ?: ""
-                val date = fmt.format(Instant.ofEpochMilli(c.getLong(2)))
-                if (query.isNullOrEmpty() || addr.lowercase().contains(query) || body.lowercase().contains(query)) {
-                    out.add("• [$date] $addr: ${body.take(140)}")
-                }
+        )?.use { cursor ->
+            while (cursor.moveToNext() && out.size < 15) {
+                val address = cursor.getString(0) ?: "Unknown"
+                val body = cursor.getString(1) ?: ""
+                val date = formatter.format(Instant.ofEpochMilli(cursor.getLong(2)))
+                out.add("• [$date] $address: ${body.take(140)}")
             }
         }
         return if (out.isEmpty()) "No SMS messages found." else out.joinToString("\n")
@@ -191,7 +241,7 @@ class PhoneSmsTool(private val context: Context, private val dao: OrinDao) : Ori
 
     private suspend fun sendSms(args: JsonObject): String {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
-            return "SEND_SMS permission not granted."
+            return "SEND_SMS permission not granted. Open Settings → Permissions to allow SMS access."
         }
         val recipient = args["recipient"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         val text = args["text"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -203,15 +253,26 @@ class PhoneSmsTool(private val context: Context, private val dao: OrinDao) : Ori
             } else {
                 @Suppress("DEPRECATION")
                 SmsManager.getDefault()
-            }
-            val parts = smsManager.divideMessage(text)
-            if (parts.size > 1) smsManager.sendMultipartTextMessage(recipient, null, parts, null, null)
-            else smsManager.sendTextMessage(recipient, null, text, null, null)
+            } ?: return "SMS service is unavailable on this device."
 
-            dao.insertAuditLog(AuditLogEntity(UUID.randomUUID().toString(), "phone_sms", "send", "To $recipient", true))
-            "SMS sent to $recipient."
+            val parts = smsManager.divideMessage(text)
+            if (parts.size > 1) {
+                smsManager.sendMultipartTextMessage(recipient, null, parts, null, null)
+            } else {
+                smsManager.sendTextMessage(recipient, null, text, null, null)
+            }
+
+            dao.insertAuditLog(
+                AuditLogEntity(UUID.randomUUID().toString(), "phone_sms", "send", "To $recipient", true),
+            )
+            "SMS queued for delivery to $recipient."
         } catch (e: Exception) {
-            dao.insertAuditLog(AuditLogEntity(UUID.randomUUID().toString(), "phone_sms", "send", "To $recipient: ${e.message}", false))
+            dao.insertAuditLog(
+                AuditLogEntity(
+                    UUID.randomUUID().toString(), "phone_sms", "send",
+                    "To $recipient: ${e.message}", false,
+                ),
+            )
             "Failed to send SMS: ${e.message}"
         }
     }
@@ -219,13 +280,31 @@ class PhoneSmsTool(private val context: Context, private val dao: OrinDao) : Ori
 
 class DeviceControlTool(private val context: Context, private val dao: OrinDao) : OrinTool {
     override val name = "device_control"
-    override val description = "Launch any installed app ('launch_app', query), list apps ('list_apps'), open settings ('open_settings', target), or set volume ('set_volume', percent)."
+    override val description = "Launch an installed app ('launch_app', query), list apps ('list_apps'), open settings ('open_settings', target), or set media volume ('set_volume', percent)."
     override val parameters = objSchema(
         "action" to "One of: 'launch_app', 'list_apps', 'open_settings', 'set_volume'.",
         "query" to "App name or package for launch_app / list_apps.",
         "target" to "Settings target: wifi, bluetooth, hotspot, display, sound, notifications.",
         "percent" to "Volume 0..100 for set_volume.",
     )
+
+    override fun approval(args: JsonObject): ToolApprovalRequest? {
+        return when (args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list_apps") {
+            "launch_app" -> ToolApprovalRequest(
+                name, "Launch an app?",
+                args["query"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+            "open_settings" -> ToolApprovalRequest(
+                name, "Open device settings?",
+                args["target"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+            "set_volume" -> ToolApprovalRequest(
+                name, "Change media volume?",
+                "${args["percent"]?.jsonPrimitive?.contentOrNull ?: "50"}%",
+            )
+            else -> null
+        }
+    }
 
     override suspend fun execute(args: JsonObject): String {
         return when (args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list_apps") {
@@ -237,32 +316,43 @@ class DeviceControlTool(private val context: Context, private val dao: OrinDao) 
     }
 
     private fun apps(): List<Pair<String, String>> {
-        val pm = context.packageManager
+        val packageManager = context.packageManager
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        return pm.queryIntentActivities(intent, 0).mapNotNull { info ->
-            val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
-            val label = info.loadLabel(pm).toString().trim().ifEmpty { pkg }
-            label to pkg
+        return packageManager.queryIntentActivities(intent, 0).mapNotNull { info ->
+            val packageName = info.activityInfo?.packageName ?: return@mapNotNull null
+            val label = info.loadLabel(packageManager).toString().trim().ifEmpty { packageName }
+            label to packageName
         }.distinctBy { it.second }.sortedBy { it.first.lowercase() }
     }
 
     private fun listApps(query: String?): String {
-        val q = query?.trim()?.lowercase()
-        val list = apps().filter { q.isNullOrEmpty() || it.first.lowercase().contains(q) || it.second.lowercase().contains(q) }
-        return if (list.isEmpty()) "No matching apps." else list.take(30).joinToString("\n") { "• ${it.first} (${it.second})" }
+        val filter = query?.trim()?.lowercase()
+        val list = apps().filter {
+            filter.isNullOrEmpty() ||
+                it.first.lowercase().contains(filter) ||
+                it.second.lowercase().contains(filter)
+        }
+        return if (list.isEmpty()) "No matching apps."
+        else list.take(30).joinToString("\n") { "• ${it.first} (${it.second})" }
     }
 
     private suspend fun launchApp(query: String): String {
-        val q = query.trim().lowercase()
-        if (q.isEmpty()) return "Provide app name or package."
-        val match = apps().firstOrNull { it.first.equals(q, true) || it.second.equals(q, true) }
-            ?: apps().firstOrNull { it.first.lowercase().contains(q) || it.second.lowercase().contains(q) }
-            ?: return "No app matching '$query'."
+        val filter = query.trim().lowercase()
+        if (filter.isEmpty()) return "Provide an app name or package."
+        val available = apps()
+        val match = available.firstOrNull {
+            it.first.equals(filter, true) || it.second.equals(filter, true)
+        } ?: available.firstOrNull {
+            it.first.lowercase().contains(filter) || it.second.lowercase().contains(filter)
+        } ?: return "No app matching '$query'."
+
         val intent = context.packageManager.getLaunchIntentForPackage(match.second)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         } ?: return "Cannot launch ${match.first}."
         context.startActivity(intent)
-        dao.insertAuditLog(AuditLogEntity(UUID.randomUUID().toString(), "device_control", "launch_app", match.first, true))
+        dao.insertAuditLog(
+            AuditLogEntity(UUID.randomUUID().toString(), "device_control", "launch_app", match.first, true),
+        )
         return "Launched ${match.first}."
     }
 
@@ -277,16 +367,25 @@ class DeviceControlTool(private val context: Context, private val dao: OrinDao) 
             else -> Settings.ACTION_SETTINGS
         }
         context.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        dao.insertAuditLog(AuditLogEntity(UUID.randomUUID().toString(), "device_control", "open_settings", target, true))
+        dao.insertAuditLog(
+            AuditLogEntity(UUID.randomUUID().toString(), "device_control", "open_settings", target, true),
+        )
         return "Opened $target settings."
     }
 
     private suspend fun setVolume(percent: Int): String {
-        val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return "AudioManager unavailable."
-        val p = percent.coerceIn(0, 100)
+        val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: return "AudioManager unavailable."
+        val volume = percent.coerceIn(0, 100)
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        audio.setStreamVolume(AudioManager.STREAM_MUSIC, (max * (p / 100.0)).toInt().coerceIn(0, max), 0)
-        dao.insertAuditLog(AuditLogEntity(UUID.randomUUID().toString(), "device_control", "set_volume", "$p%", true))
-        return "Set media volume to $p%."
+        audio.setStreamVolume(
+            AudioManager.STREAM_MUSIC,
+            (max * (volume / 100.0)).toInt().coerceIn(0, max),
+            0,
+        )
+        dao.insertAuditLog(
+            AuditLogEntity(UUID.randomUUID().toString(), "device_control", "set_volume", "$volume%", true),
+        )
+        return "Set media volume to $volume%."
     }
 }

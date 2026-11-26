@@ -26,3 +26,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Built release artifacts (generated locally, not source)
+release/

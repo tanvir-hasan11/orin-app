@@ -70,6 +70,15 @@ interface OrinDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertConversation(conversation: ConversationEntity)
 
+    @Query("SELECT * FROM conversations WHERE id = :id")
+    suspend fun getConversation(id: String): ConversationEntity?
+
+    @Query("UPDATE conversations SET updatedAtMs = :updatedAtMs WHERE id = :id")
+    suspend fun touchConversation(id: String, updatedAtMs: Long)
+
+    @Query("DELETE FROM conversations WHERE id = :id")
+    suspend fun deleteConversation(id: String)
+
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAtMs ASC")
     fun observeMessages(conversationId: String): Flow<List<MessageEntity>>
 
@@ -101,7 +110,7 @@ interface OrinDao {
 @Database(
     entities = [ConversationEntity::class, MessageEntity::class, TaskEntity::class, AuditLogEntity::class],
     version = 1,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class OrinDatabase : RoomDatabase() {
     abstract fun dao(): OrinDao
