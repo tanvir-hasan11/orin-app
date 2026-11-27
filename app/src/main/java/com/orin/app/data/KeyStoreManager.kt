@@ -53,7 +53,7 @@ class KeyStoreManager(context: Context) {
 
     fun setShellEnabled(enabled: Boolean) = putSecret("shell_enabled", enabled.toString())
 
-    fun voiceLanguage(): String = getSecret("voice_language") ?: "en-IN"
+    fun voiceLanguage(): String = getSecret("voice_language") ?: "bn-IN"
     fun setVoiceLanguage(tag: String) = putSecret("voice_language", tag)
 
     fun speakReplies(): Boolean = getSecret("speak_replies") != "false"

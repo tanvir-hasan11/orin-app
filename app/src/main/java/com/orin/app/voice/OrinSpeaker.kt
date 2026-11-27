@@ -92,7 +92,7 @@ class OrinSpeaker(private val context: Context) {
         .take(1_500)
 
     companion object {
-        const val DEFAULT_LANGUAGE = "en-IN"
+        const val DEFAULT_LANGUAGE = "bn-IN"
         private const val UTTERANCE_ID = "orin_voice_reply"
     }
 }

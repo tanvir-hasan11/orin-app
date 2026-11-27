@@ -10,8 +10,11 @@ object OrinVoice {
     const val PREF_SPEAK_REPLIES = "voice_speak_replies"
     const val PREF_ORB_ENABLED = "voice_orb_enabled"
 
+    const val DEFAULT_LANGUAGE = "bn-IN"
+
     fun languages(): List<Pair<String, String>> = listOf(
-        "en-IN" to "English (India)",
+        "bn-IN" to "বাংলা",
         "hi-IN" to "हिन्दी",
+        "en-IN" to "English",
     )
 }

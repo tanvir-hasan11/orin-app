@@ -52,7 +52,7 @@ You choose the provider by entering your own API key. Each provider's own privac
 
 All of these are optional and requested at runtime. Device features requiring them remain available if you deny them. The shell and file tools run inside a private workspace and never receive Android shell permissions.
 
-Voice recognition is fully offline: no audio is uploaded. Screen control never sends screenshots anywhere. Orin refuses to operate banking, UPI, password-manager, Play Store and Settings apps, never types a PIN, password, OTP or card number, and requires a finger tap on an approval card before it changes anything in another app.
+Voice recognition prefers the device's on-device speech model in Bangla (`bn-BD`), Hindi and English. Orin never records or uploads audio itself; the system speech service may use the network if your device has no offline language pack installed. Screen control never sends screenshots anywhere. Orin refuses to operate banking, UPI, password-manager, Play Store and Settings apps, never types a PIN, password, OTP or card number, and requires a finger tap on an approval card before it changes anything in another app.
 
 ## Human approval
 

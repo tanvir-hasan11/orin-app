@@ -385,6 +385,11 @@ fun OrinSettingsScreen(
                             }
                         }
                     }
+                    Text(
+                        text = "বাংলা ও হিন্দী শোনার জন্য ডিভাইসের ভয়েস প্যাক লাগতে পারে (Settings → Languages & input)। বাংলা প্যাক না থাকলে Orin Hindi/English-এ ফিরে যাবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                    )
                 }
             }
 

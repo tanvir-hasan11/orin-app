@@ -248,6 +248,13 @@ private fun OrinRootShell(
         }
     }
 
+    LaunchedEffect(Unit) {
+        voice.error.collect { message ->
+            isListening = false
+            interimText = message
+        }
+    }
+
     LaunchedEffect(initialVoiceAction) {
         when (initialVoiceAction) {
             OrinVoice.ACTION_VOICE -> {

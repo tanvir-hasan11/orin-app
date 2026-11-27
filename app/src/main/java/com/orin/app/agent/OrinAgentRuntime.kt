@@ -288,6 +288,8 @@ class OrinAgentRuntime(
 
         private fun systemPrompt(language: String): String {
             val voice = when (language) {
+                "bn-IN" ->
+                    "Reply in natural Bengali (বাংলা), using the same register as the user. Short, calm sentences."
                 "hi-IN" ->
                     "Reply in natural Hindi (देवनागरी), mixing in Hinglish only when the user does."
                 "en-IN" ->
