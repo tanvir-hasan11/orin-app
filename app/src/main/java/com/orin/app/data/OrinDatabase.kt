@@ -12,6 +12,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "conversations")
@@ -49,6 +51,14 @@ data class TaskEntity(
     val priority: String = "normal",
     val due: String? = null,
     val completed: Boolean = false,
+    val createdAtMs: Long = System.currentTimeMillis(),
+)
+
+@Entity(tableName = "memories", indices = [Index("key")])
+data class MemoryEntity(
+    @PrimaryKey val id: String,
+    val key: String,
+    val value: String,
     val createdAtMs: Long = System.currentTimeMillis(),
 )
 
@@ -100,6 +110,21 @@ interface OrinDao {
     @Query("DELETE FROM personal_tasks WHERE id = :id")
     suspend fun deleteTask(id: String)
 
+    @Query("SELECT * FROM memories ORDER BY createdAtMs DESC LIMIT 200")
+    fun observeMemories(): Flow<List<MemoryEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMemory(memory: MemoryEntity)
+
+    @Query("SELECT * FROM memories WHERE lower(key) = lower(:key) ORDER BY createdAtMs DESC LIMIT 1")
+    suspend fun findMemory(key: String): MemoryEntity?
+
+    @Query("SELECT * FROM memories WHERE lower(key) LIKE '%' || lower(:query) || '%' OR lower(value) LIKE '%' || lower(:query) || '%' ORDER BY createdAtMs DESC LIMIT 20")
+    suspend fun searchMemories(query: String): List<MemoryEntity>
+
+    @Query("DELETE FROM memories WHERE id = :id")
+    suspend fun deleteMemory(id: String)
+
     @Query("SELECT * FROM audit_logs ORDER BY timestampMs DESC LIMIT 50")
     fun observeAuditLogs(): Flow<List<AuditLogEntity>>
 
@@ -108,14 +133,36 @@ interface OrinDao {
 }
 
 @Database(
-    entities = [ConversationEntity::class, MessageEntity::class, TaskEntity::class, AuditLogEntity::class],
-    version = 1,
+    entities = [
+        ConversationEntity::class,
+        MessageEntity::class,
+        TaskEntity::class,
+        MemoryEntity::class,
+        AuditLogEntity::class,
+    ],
+    version = 2,
     exportSchema = true,
 )
 abstract class OrinDatabase : RoomDatabase() {
     abstract fun dao(): OrinDao
 
     companion object {
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        `key` TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        createdAtMs INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_memories_key ON memories (`key`)")
+            }
+        }
+
         @Volatile
         private var instance: OrinDatabase? = null
 
@@ -127,6 +174,7 @@ abstract class OrinDatabase : RoomDatabase() {
                     "orin_db",
                 )
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                    .addMigrations(MIGRATION_1_2)
                     .build()
                     .also { instance = it }
             }

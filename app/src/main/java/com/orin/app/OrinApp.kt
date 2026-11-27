@@ -4,8 +4,11 @@ import android.app.Application
 import com.orin.app.agent.OrinAgentRuntime
 import com.orin.app.tools.DeviceControlTool
 import com.orin.app.tools.FileOpsTool
+import com.orin.app.tools.MemoryTool
 import com.orin.app.tools.MetaAdsTool
 import com.orin.app.tools.MorningBriefTool
+import com.orin.app.tools.PhoneBasicsTool
+import com.orin.app.tools.PhoneIntentsTool
 import com.orin.app.tools.PersonalTrackerTool
 import com.orin.app.tools.PhoneCalendarTool
 import com.orin.app.tools.PhoneContactsTool
@@ -34,6 +37,9 @@ class OrinApp : Application() {
             registerTool(FileOpsTool(this@OrinApp))
             registerTool(WorkspaceShellTool(this@OrinApp, db.dao(), keys))
             registerTool(WebFetchTool())
+            registerTool(MemoryTool(db.dao()))
+            registerTool(PhoneIntentsTool(this@OrinApp, db.dao()))
+            registerTool(PhoneBasicsTool(this@OrinApp, db.dao()))
         }
     }
 }
