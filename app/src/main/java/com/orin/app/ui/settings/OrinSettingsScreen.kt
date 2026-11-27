@@ -9,6 +9,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -71,6 +74,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.orin.app.agent.OrinAgentRuntime
 import com.orin.app.control.OrinControlService
 import com.orin.app.notify.OrinNotificationListener
+import com.orin.app.util.OrinCrashHandler
 import com.orin.app.util.OrinPermissions
 import com.orin.app.voice.OrbOverlay
 import com.orin.app.voice.OrinVoice
@@ -93,6 +97,7 @@ fun OrinSettingsScreen(
     var selectedProvider by remember { mutableStateOf(keys.activeProviderId()) }
     var apiKeyInput by remember { mutableStateOf(keys.getSecret("api_key_$selectedProvider").orEmpty()) }
     var modelInput by remember { mutableStateOf(keys.activeModel()) }
+    var customBaseUrlInput by remember { mutableStateOf(keys.customBaseUrl()) }
     var metaTokenInput by remember { mutableStateOf(keys.getSecret("meta_ads_token").orEmpty()) }
     var metaAccountInput by remember { mutableStateOf(keys.getSecret("meta_ad_account_id").orEmpty()) }
     var savedBanner by remember { mutableStateOf<String?>(null) }
@@ -110,6 +115,8 @@ fun OrinSettingsScreen(
     var notificationsEnabled by remember { mutableStateOf(OrinNotificationListener.isEnabled(context)) }
     var confirmClear by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
+    var showCrash by remember { mutableStateOf(false) }
+    val lastCrash = remember(showCrash) { if (showCrash) OrinCrashHandler.lastCrash(context) else null }
     var permissionRefresh by remember { mutableIntStateOf(0) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -163,7 +170,13 @@ fun OrinSettingsScreen(
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("gemini" to "Gemini", "anthropic" to "Claude", "openai" to "OpenAI", "deepseek" to "DeepSeek").forEach { (id, label) ->
+                        listOf(
+                            "gemini" to "Gemini",
+                            "anthropic" to "Claude",
+                            "openai" to "OpenAI",
+                            "deepseek" to "DeepSeek",
+                            "custom" to "Custom API",
+                        ).forEach { (id, label) ->
                             val selected = selectedProvider == id
                             Box(
                                 modifier = Modifier
@@ -189,6 +202,13 @@ fun OrinSettingsScreen(
                         value = modelInput,
                         onValueChange = { modelInput = it },
                     )
+                    if (selectedProvider == "custom") {
+                        SettingsField(
+                            label = "Base URL (OpenAI-compatible, e.g. https://api.example.com/v1)",
+                            value = customBaseUrlInput,
+                            onValueChange = { customBaseUrlInput = it },
+                        )
+                    }
                     SettingsField(
                         label = "${selectedProvider.replaceFirstChar { it.uppercase() }} API Key",
                         value = apiKeyInput,
@@ -214,6 +234,10 @@ fun OrinSettingsScreen(
                                     keys.setActiveProviderId(selectedProvider)
                                     keys.setActiveModel(modelInput.trim().ifBlank { keys.defaultModel(selectedProvider) })
                                     keys.putSecret("api_key_$selectedProvider", apiKeyInput)
+                                    if (selectedProvider == "custom") {
+                                        keys.setCustomBaseUrl(customBaseUrlInput)
+                                        keys.setCustomModel(modelInput.trim().ifBlank { keys.defaultModel("custom") })
+                                    }
                                     savedBanner = "Saved for $selectedProvider"
                                 }
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -476,8 +500,21 @@ fun OrinSettingsScreen(
                 SettingsRow(
                     icon = Icons.Outlined.Info,
                     title = "About Orin",
-                    subtitle = "Version 1.0.0 · Privacy",
+                    subtitle = "Version 1.6.0 · Privacy",
                     onClick = { showAbout = true },
+                )
+            }
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.Info,
+                    title = "Last crash log",
+                    subtitle = if (OrinCrashHandler.lastCrash(context) != null) {
+                        "Tap to see the exact error — send it to the developer"
+                    } else {
+                        "No crash recorded"
+                    },
+                    onClick = { showCrash = true },
                 )
             }
         }
@@ -521,6 +558,30 @@ fun OrinSettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showAbout = false }) { Text("Close") }
+            },
+        )
+    }
+
+    if (showCrash) {
+        AlertDialog(
+            onDismissRequest = { showCrash = false },
+            title = { Text(lastCrash?.first ?: "No crash log") },
+            text = {
+                Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                    Text(
+                        lastCrash?.second ?: "No crash has been recorded on this device.",
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCrash = false }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    OrinCrashHandler.clear(context)
+                    showCrash = false
+                }) { Text("Delete log") }
             },
         )
     }

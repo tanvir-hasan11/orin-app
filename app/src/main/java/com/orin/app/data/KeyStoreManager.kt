@@ -40,6 +40,7 @@ class KeyStoreManager(context: Context) {
         "anthropic" -> "claude-sonnet-4-20250514"
         "openai" -> "gpt-4o"
         "deepseek" -> "deepseek-chat"
+        "custom" -> customModel()
         else -> "gemini-2.5-flash"
     }
 
@@ -52,6 +53,14 @@ class KeyStoreManager(context: Context) {
     fun shellEnabled(): Boolean = getSecret("shell_enabled") != "false"
 
     fun setShellEnabled(enabled: Boolean) = putSecret("shell_enabled", enabled.toString())
+
+    fun customBaseUrl(): String = getSecret("custom_base_url").orEmpty()
+    fun setCustomBaseUrl(url: String) = putSecret("custom_base_url", url.trimEnd('/'))
+
+    fun customModel(): String = getSecret("custom_model") ?: "gpt-4o-mini"
+    fun setCustomModel(model: String) = putSecret("custom_model", model)
+
+    fun customApiKey(): String = getSecret("api_key_custom").orEmpty()
 
     fun voiceLanguage(): String = getSecret("voice_language") ?: "bn-IN"
     fun setVoiceLanguage(tag: String) = putSecret("voice_language", tag)

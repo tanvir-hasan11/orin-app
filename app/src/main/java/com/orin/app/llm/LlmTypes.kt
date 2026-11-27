@@ -43,6 +43,7 @@ interface LlmClient {
         systemPrompt: String,
         messages: List<LlmTurnMessage>,
         tools: List<LlmToolDeclaration> = emptyList(),
+        baseUrl: String? = null,
     ): Flow<LlmEvent>
 }
 

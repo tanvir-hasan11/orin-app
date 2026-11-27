@@ -22,7 +22,14 @@ class OrinVoiceService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            // Foreground-start restrictions on some OEM skins: keep the orb
+            // usable without the service instead of crashing.
+            stopSelf()
+            return
+        }
         val enabled = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(OrinVoice.PREF_ORB_ENABLED, false)
         if (enabled && OrbOverlay.canShow(this)) {
@@ -64,11 +71,21 @@ class OrinVoiceService : Service() {
     }
 
     private fun launch(action: String) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            this.action = action
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                this.action = action
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,
+                )
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            // An orb tap must never take down the foreground service.
+            stopSelf()
         }
-        startActivity(intent)
     }
 
     private fun buildNotification(): Notification {

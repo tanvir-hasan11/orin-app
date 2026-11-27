@@ -51,6 +51,7 @@ class OrinLlmClient(
         systemPrompt: String,
         messages: List<LlmTurnMessage>,
         tools: List<LlmToolDeclaration>,
+        baseUrl: String?,
     ): Flow<LlmEvent> = channelFlow {
         val cancelHandle = currentCoroutineContext().job.invokeOnCompletion {
             httpClient.dispatcher.cancelAll()
@@ -61,6 +62,22 @@ class OrinLlmClient(
                 when (provider.lowercase()) {
                     "gemini" -> channel.callGemini(model, apiKey, systemPrompt, messages, tools)
                     "anthropic" -> channel.callAnthropic(model, apiKey, systemPrompt, messages, tools)
+                    "custom" -> {
+                        val root = baseUrl?.trim().orEmpty()
+                        if (root.isEmpty()) error("Add a Custom API base URL in Settings → Models & API Keys.")
+                        val parsed = com.orin.app.security.UrlSafety.validateSyntax(root)
+                        check(parsed.path.trim('/').isEmpty() || parsed.path.endsWith("/v1")) {
+                            "Use the provider's base URL (for example https://api.example.com/v1)."
+                        }
+                        channel.callOpenAiCompatible(
+                            url = "$root/chat/completions",
+                            model = model,
+                            apiKey = apiKey,
+                            systemPrompt = systemPrompt,
+                            messages = messages,
+                            tools = tools,
+                        )
+                    }
                     "deepseek" -> channel.callOpenAiCompatible(
                         url = "https://api.deepseek.com/v1/chat/completions",
                         model = model,

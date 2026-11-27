@@ -131,6 +131,7 @@ class OrinAgentRuntime(
                     systemPrompt = systemPrompt,
                     messages = transcript,
                     tools = declarations,
+                    baseUrl = if (provider == "custom") keys.customBaseUrl() else null,
                 ).collect { event ->
                     when (event) {
                         is LlmEvent.Token -> {

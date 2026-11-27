@@ -57,6 +57,7 @@ private val providers = listOf(
     "anthropic" to "Claude",
     "openai" to "OpenAI",
     "deepseek" to "DeepSeek",
+    "custom" to "Custom API",
 )
 
 @Composable
@@ -72,6 +73,7 @@ fun OrinOnboardingScreen(
     var apiKey by rememberSaveable {
         mutableStateOf(keys.getSecret("api_key_${keys.activeProviderId()}").orEmpty())
     }
+    var baseUrl by rememberSaveable { mutableStateOf(keys.customBaseUrl()) }
     var error by remember { mutableStateOf<String?>(null) }
     var permissionRefresh by remember { mutableIntStateOf(0) }
 
@@ -177,6 +179,16 @@ fun OrinOnboardingScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(10.dp))
+                    if (provider == "custom") {
+                        OutlinedTextField(
+                            value = baseUrl,
+                            onValueChange = { baseUrl = it },
+                            label = { Text("Base URL (e.g. https://api.example.com/v1)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
                     OutlinedTextField(
                         value = apiKey,
                         onValueChange = { apiKey = it },
@@ -200,6 +212,10 @@ fun OrinOnboardingScreen(
                             keys.setActiveProviderId(provider)
                             keys.setActiveModel(model.trim().ifBlank { keys.defaultModel(provider) })
                             keys.putSecret("api_key_$provider", trimmed)
+                            if (provider == "custom") {
+                                keys.setCustomBaseUrl(baseUrl)
+                                keys.setCustomModel(model.trim().ifBlank { keys.defaultModel("custom") })
+                            }
                             error = null
                             step = 2
                         }

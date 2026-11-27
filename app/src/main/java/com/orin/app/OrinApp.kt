@@ -2,6 +2,7 @@ package com.orin.app
 
 import android.app.Application
 import com.orin.app.agent.OrinAgentRuntime
+import com.orin.app.util.OrinCrashHandler
 import com.orin.app.tools.ScreenControlTool
 import com.orin.app.tools.DeviceControlTool
 import com.orin.app.tools.FileOpsTool
@@ -19,6 +20,11 @@ import com.orin.app.tools.WebFetchTool
 import com.orin.app.tools.WorkspaceShellTool
 
 class OrinApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        OrinCrashHandler.install(this)
+    }
+
     val runtime: OrinAgentRuntime by lazy {
         OrinAgentRuntime(this).apply {
             val cal = PhoneCalendarTool(this@OrinApp)
