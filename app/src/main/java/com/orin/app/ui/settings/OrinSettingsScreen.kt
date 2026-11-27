@@ -427,6 +427,26 @@ fun OrinSettingsScreen(
                 )
             }
 
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.Shield,
+                    title = "Approval cards over other apps",
+                    subtitle = if (overlayGranted) {
+                        "Granted — Allow/Deny cards can appear over any app"
+                    } else {
+                        "Required for finger-only Allow cards during screen control"
+                    },
+                    onClick = {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:${context.packageName}"),
+                            ),
+                        )
+                    },
+                )
+            }
+
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
 
             item {

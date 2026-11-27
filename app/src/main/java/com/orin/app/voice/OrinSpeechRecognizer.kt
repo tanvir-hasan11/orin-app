@@ -27,12 +27,18 @@ class OrinSpeechRecognizer(private val context: Context) {
         extraBufferCapacity = 4,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 2)
 
     /** Interim transcription, replaced as more audio arrives. */
     val partial: SharedFlow<String> = _partial
 
     /** A completed utterance; emitted once per recognition pass. */
     val final: SharedFlow<String> = _final
+    val error: SharedFlow<String> = _error
+
+    fun reportError(message: String) {
+        _error.tryEmit(message)
+    }
 
     private var model: Model? = null
     private var recognizer: Recognizer? = null

@@ -53,6 +53,7 @@ class OrinVoiceController(private val context: Context) {
     init {
         scope.launch { vosk.partial.collect { _partial.emit(it) } }
         scope.launch { vosk.final.collect { _final.emit(it) } }
+        scope.launch { vosk.error.collect { _error.emit(it) } }
         scope.launch { platform.partial.collect { _partial.emit(it) } }
         scope.launch { platform.final.collect { _final.emit(it) } }
         scope.launch {
@@ -105,6 +106,7 @@ class OrinVoiceController(private val context: Context) {
 
     fun release() {
         stopListening()
+        mic.release()
         scope.cancel()
         vosk.close()
         platform.destroy()

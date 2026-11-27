@@ -8,13 +8,15 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** Streams 16 kHz mono PCM from the microphone into [OrinSpeechRecognizer]. */
 class OrinMic(private val context: Context) {
@@ -22,6 +24,7 @@ class OrinMic(private val context: Context) {
     private val _level = MutableStateFlow(0f)
     val level: StateFlow<Float> = _level
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var recorder: AudioRecord? = null
     private var job: Job? = null
 
@@ -57,37 +60,43 @@ class OrinMic(private val context: Context) {
             return false
         }
 
-        recognizer.prepare()
+        try {
+            recognizer.prepare()
+        } catch (e: Exception) {
+            source.release()
+            throw e
+        }
         recognizer.start()
         recorder = source
         source.startRecording()
 
-        job = withContext(Dispatchers.Default) {
-            launch {
-                val chunk = ShortArray(OrinSpeechRecognizer.CHUNK_SIZE)
-                try {
-                    while (isActive && recorder == source) {
-                        val read = source.read(chunk, 0, chunk.size)
-                        if (read <= 0) continue
-                        var peak = 0
-                        for (i in 0 until read) {
-                            val magnitude = kotlin.math.abs(chunk[i].toInt())
-                            if (magnitude > peak) peak = magnitude
-                        }
-                        _level.value = (peak / 32_768f).coerceIn(0f, 1f)
-                        if (recognizer.accept(chunk, read)) {
-                            // A final result ends this listening pass.
-                            break
-                        }
+        // Launch on our own scope: using withContext here would suspend start()
+        // until the utterance ends, so the UI would never learn that listening
+        // actually began.
+        job = scope.launch {
+            val chunk = ShortArray(OrinSpeechRecognizer.CHUNK_SIZE)
+            try {
+                while (isActive && recorder == source) {
+                    val read = source.read(chunk, 0, chunk.size)
+                    if (read <= 0) continue
+                    var peak = 0
+                    for (i in 0 until read) {
+                        val magnitude = kotlin.math.abs(chunk[i].toInt())
+                        if (magnitude > peak) peak = magnitude
                     }
-                } catch (_: CancellationException) {
-                    // Normal stop.
-                } finally {
-                    runCatching { source.stop() }
-                    source.release()
-                    if (recorder == source) recorder = null
-                    _level.value = 0f
+                    _level.value = (peak / 32_768f).coerceIn(0f, 1f)
+                    if (recognizer.accept(chunk, read)) break
                 }
+            } catch (_: CancellationException) {
+                // Normal stop.
+            } catch (e: Exception) {
+                // Surface model/audio errors instead of silently going dead.
+                recognizer.reportError("Voice input stopped: ${e.message ?: "unknown error"}")
+            } finally {
+                runCatching { source.stop() }
+                source.release()
+                if (recorder == source) recorder = null
+                _level.value = 0f
             }
         }
         return true
@@ -97,5 +106,14 @@ class OrinMic(private val context: Context) {
         job?.cancel()
         job = null
         recognizer.cancel()
+    }
+
+    fun release() {
+        job?.cancel()
+        job = null
+        recorder?.let { runCatching { it.stop(); it.release() } }
+        recorder = null
+        scope.cancel()
+        _level.value = 0f
     }
 }
