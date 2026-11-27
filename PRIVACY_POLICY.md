@@ -23,6 +23,7 @@ The only network traffic Orin makes is to the AI provider and tools you explicit
 | Files created by the workspace tool | App-private `filesDir/workspace` | No |
 | Offline speech model (Vosk) | App-private storage, downloaded at build time | No |
 | Saved memories | Local Room database | No |
+| Recent notification summaries | In memory only (cleared when the process ends) | The masked summary is sent to your chosen AI provider only when you ask "what did I miss?" |
 
 Backups and device-to-device transfer are explicitly disabled. Unticking "Allow backup" is deliberate: an encrypted keystore restored onto another device is unusable, and chat history should not leave the phone.
 

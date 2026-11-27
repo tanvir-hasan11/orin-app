@@ -7,6 +7,7 @@ import com.orin.app.tools.DeviceControlTool
 import com.orin.app.tools.FileOpsTool
 import com.orin.app.tools.MemoryTool
 import com.orin.app.tools.MetaAdsTool
+import com.orin.app.tools.NotificationTool
 import com.orin.app.tools.MorningBriefTool
 import com.orin.app.tools.PhoneBasicsTool
 import com.orin.app.tools.PhoneIntentsTool
@@ -40,6 +41,7 @@ class OrinApp : Application() {
             registerTool(WebFetchTool())
             registerTool(MemoryTool(db.dao()))
             registerTool(ScreenControlTool(this@OrinApp, db.dao()))
+            registerTool(NotificationTool(this@OrinApp))
             registerTool(PhoneIntentsTool(this@OrinApp, db.dao()))
             registerTool(PhoneBasicsTool(this@OrinApp, db.dao()))
         }

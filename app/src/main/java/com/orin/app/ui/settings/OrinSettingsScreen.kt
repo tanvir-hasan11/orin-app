@@ -70,6 +70,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.orin.app.agent.OrinAgentRuntime
 import com.orin.app.control.OrinControlService
+import com.orin.app.notify.OrinNotificationListener
 import com.orin.app.util.OrinPermissions
 import com.orin.app.voice.OrbOverlay
 import com.orin.app.voice.OrinVoice
@@ -106,6 +107,7 @@ fun OrinSettingsScreen(
     }
     var overlayGranted by remember { mutableStateOf(OrbOverlay.canShow(context)) }
     var controlEnabled by remember { mutableStateOf(OrinControlService.isEnabled(context)) }
+    var notificationsEnabled by remember { mutableStateOf(OrinNotificationListener.isEnabled(context)) }
     var confirmClear by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var permissionRefresh by remember { mutableIntStateOf(0) }
@@ -117,6 +119,7 @@ fun OrinSettingsScreen(
         permissionRefresh++
         overlayGranted = OrbOverlay.canShow(context)
         controlEnabled = OrinControlService.isEnabled(context)
+        notificationsEnabled = OrinNotificationListener.isEnabled(context)
     }
 
     Scaffold(
@@ -383,6 +386,23 @@ fun OrinSettingsScreen(
                         }
                     }
                 }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.Shield,
+                    title = "Message summaries",
+                    subtitle = if (notificationsEnabled) {
+                        "On — codes and links are hidden from summaries"
+                    } else {
+                        "Off — allow notification access for \"what did I miss?\""
+                    },
+                    onClick = {
+                        context.startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
+                    },
+                )
             }
 
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
