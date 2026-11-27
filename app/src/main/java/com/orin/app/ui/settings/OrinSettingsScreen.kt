@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.orin.app.agent.OrinAgentRuntime
+import com.orin.app.control.OrinControlService
 import com.orin.app.util.OrinPermissions
 import com.orin.app.voice.OrbOverlay
 import com.orin.app.voice.OrinVoice
@@ -104,6 +105,7 @@ fun OrinSettingsScreen(
         )
     }
     var overlayGranted by remember { mutableStateOf(OrbOverlay.canShow(context)) }
+    var controlEnabled by remember { mutableStateOf(OrinControlService.isEnabled(context)) }
     var confirmClear by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var permissionRefresh by remember { mutableIntStateOf(0) }
@@ -114,6 +116,7 @@ fun OrinSettingsScreen(
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         permissionRefresh++
         overlayGranted = OrbOverlay.canShow(context)
+        controlEnabled = OrinControlService.isEnabled(context)
     }
 
     Scaffold(
@@ -380,6 +383,23 @@ fun OrinSettingsScreen(
                         }
                     }
                 }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.PhoneAndroid,
+                    title = "Screen control",
+                    subtitle = if (controlEnabled) {
+                        "On — Orin can read and operate apps you open"
+                    } else {
+                        "Off — enable the accessibility service to use any app"
+                    },
+                    onClick = {
+                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    },
+                )
             }
 
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }

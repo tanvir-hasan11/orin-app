@@ -21,6 +21,8 @@ The only network traffic Orin makes is to the AI provider and tools you explicit
 | AI provider API keys | Android Keystore-backed `EncryptedSharedPreferences` | Only to the provider the key belongs to |
 | Meta Ads account ID and access token | Android Keystore-backed `EncryptedSharedPreferences` | Only to Meta's Graph API |
 | Files created by the workspace tool | App-private `filesDir/workspace` | No |
+| Offline speech model (Vosk) | App-private storage, downloaded at build time | No |
+| Saved memories | Local Room database | No |
 
 Backups and device-to-device transfer are explicitly disabled. Unticking "Allow backup" is deliberate: an encrypted keystore restored onto another device is unusable, and chat history should not leave the phone.
 
@@ -41,8 +43,15 @@ You choose the provider by entering your own API key. Each provider's own privac
 | Calendar (read/write) | Show upcoming events and create an event you ask for | Only when the calendar tool runs |
 | Contacts (read) | Find a contact for a message you ask to send | Only when the contacts tool runs |
 | SMS (read/send) | Show recent messages and send a text you approve | Only when the SMS tool runs |
+| Microphone | Speak to Orin using the offline speech model | Only while you hold the voice button or the orb is listening |
+| Camera (torch only) | Switch the flashlight on or off when you ask | Only when that tool runs |
+| Exact alarms | Deliver reminders at the time you choose | Only when you set a reminder |
+| Display over other apps | Show the floating voice orb | Only while the orb is enabled |
+| Accessibility | Let Orin read and operate an app on your instruction | Only while you have it enabled; every risky action needs your tap |
 
 All of these are optional and requested at runtime. Device features requiring them remain available if you deny them. The shell and file tools run inside a private workspace and never receive Android shell permissions.
+
+Voice recognition is fully offline: no audio is uploaded. Screen control never sends screenshots anywhere. Orin refuses to operate banking, UPI, password-manager, Play Store and Settings apps, never types a PIN, password, OTP or card number, and requires a finger tap on an approval card before it changes anything in another app.
 
 ## Human approval
 

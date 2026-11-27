@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Orin</string>
+    <string name="control_service_description">Lets Orin read the screen and tap, type or scroll on your instruction. Orin never controls banking, payment, password-manager, Play Store or Settings apps, and every risky action needs your approval.</string>
 </resources>

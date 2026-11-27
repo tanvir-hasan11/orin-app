@@ -2,6 +2,7 @@ package com.orin.app
 
 import android.app.Application
 import com.orin.app.agent.OrinAgentRuntime
+import com.orin.app.tools.ScreenControlTool
 import com.orin.app.tools.DeviceControlTool
 import com.orin.app.tools.FileOpsTool
 import com.orin.app.tools.MemoryTool
@@ -38,6 +39,7 @@ class OrinApp : Application() {
             registerTool(WorkspaceShellTool(this@OrinApp, db.dao(), keys))
             registerTool(WebFetchTool())
             registerTool(MemoryTool(db.dao()))
+            registerTool(ScreenControlTool(this@OrinApp, db.dao()))
             registerTool(PhoneIntentsTool(this@OrinApp, db.dao()))
             registerTool(PhoneBasicsTool(this@OrinApp, db.dao()))
         }
