@@ -53,6 +53,12 @@ class KeyStoreManager(context: Context) {
 
     fun setShellEnabled(enabled: Boolean) = putSecret("shell_enabled", enabled.toString())
 
+    fun voiceLanguage(): String = getSecret("voice_language") ?: "en-IN"
+    fun setVoiceLanguage(tag: String) = putSecret("voice_language", tag)
+
+    fun speakReplies(): Boolean = getSecret("speak_replies") != "false"
+    fun setSpeakReplies(enabled: Boolean) = putSecret("speak_replies", enabled.toString())
+
     fun biometricGateEnabled(): Boolean = getSecret("biometric_gate") == "true"
     fun setBiometricGateEnabled(enabled: Boolean) = putSecret("biometric_gate", enabled.toString())
 }

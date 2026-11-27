@@ -33,6 +33,7 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.TrendingUp
 import androidx.compose.material.icons.outlined.WbSunny
@@ -76,6 +77,10 @@ fun OrinChatScreen(
     activeModelLabel: String,
     isStreaming: Boolean,
     canRetry: Boolean,
+    voiceMode: Boolean,
+    isListening: Boolean,
+    interimText: String,
+    onVoiceToggle: () -> Unit,
     onOpenDrawer: () -> Unit,
     onPickModel: () -> Unit,
     onNewChat: () -> Unit,
@@ -171,9 +176,14 @@ fun OrinChatScreen(
                     ) {
                         if (inputText.isEmpty()) {
                             Text(
-                                text = "Reply to Orin...",
+                                text = when {
+                                    isListening && interimText.isNotBlank() -> interimText
+                                    isListening -> "Listening…"
+                                    voiceMode -> "Speak, or type here…"
+                                    else -> "Reply to Orin..."
+                                },
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = scheme.onSurfaceVariant,
+                                color = if (isListening) scheme.primary else scheme.onSurfaceVariant,
                             )
                         }
                         BasicTextField(
@@ -195,8 +205,28 @@ fun OrinChatScreen(
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.End,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (isListening) scheme.primary
+                                    else if (voiceMode) scheme.primaryContainer
+                                    else scheme.surfaceContainerHigh,
+                                )
+                                .clickable(onClick = onVoiceToggle),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Mic,
+                                contentDescription = if (isListening) "Stop listening" else "Speak to Orin",
+                                tint = if (isListening) Color.White else scheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+
                         if (isStreaming) {
                             Box(
                                 modifier = Modifier

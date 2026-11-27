@@ -29,6 +29,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
@@ -69,6 +70,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.orin.app.agent.OrinAgentRuntime
 import com.orin.app.util.OrinPermissions
+import com.orin.app.voice.OrbOverlay
+import com.orin.app.voice.OrinVoice
+import com.orin.app.voice.OrinVoiceService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -91,6 +95,15 @@ fun OrinSettingsScreen(
     var metaAccountInput by remember { mutableStateOf(keys.getSecret("meta_ad_account_id").orEmpty()) }
     var savedBanner by remember { mutableStateOf<String?>(null) }
     var shellEnabled by remember { mutableStateOf(keys.shellEnabled()) }
+    var speakReplies by remember { mutableStateOf(keys.speakReplies()) }
+    var voiceLanguage by remember { mutableStateOf(keys.voiceLanguage()) }
+    var orbEnabled by remember {
+        mutableStateOf(
+            context.getSharedPreferences("orin_voice", android.content.Context.MODE_PRIVATE)
+                .getBoolean(OrinVoice.PREF_ORB_ENABLED, false),
+        )
+    }
+    var overlayGranted by remember { mutableStateOf(OrbOverlay.canShow(context)) }
     var confirmClear by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var permissionRefresh by remember { mutableIntStateOf(0) }
@@ -98,7 +111,10 @@ fun OrinSettingsScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissionRefresh++ }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { permissionRefresh++ }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        permissionRefresh++
+        overlayGranted = OrbOverlay.canShow(context)
+    }
 
     Scaffold(
         containerColor = scheme.background,
@@ -278,6 +294,90 @@ fun OrinSettingsScreen(
                             .padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
                         Text("Save Meta Ads", style = MaterialTheme.typography.labelLarge, color = Color.White)
+                    }
+                }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Mic, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text("Voice", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                    }
+                    SettingsToggleRow(
+                        icon = Icons.Outlined.Mic,
+                        title = "Speak replies aloud",
+                        subtitle = "Orin reads its answers using your device voice",
+                        checked = speakReplies,
+                        onCheckedChange = {
+                            speakReplies = it
+                            keys.setSpeakReplies(it)
+                        },
+                    )
+                    SettingsToggleRow(
+                        icon = Icons.Outlined.PhoneAndroid,
+                        title = "Floating orb",
+                        subtitle = if (overlayGranted) {
+                            "Tap over any app to talk to Orin"
+                        } else {
+                            "Requires \"Display over other apps\" permission"
+                        },
+                        checked = orbEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled && !overlayGranted) {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}"),
+                                    ),
+                                )
+                            } else {
+                                orbEnabled = enabled
+                                context.getSharedPreferences("orin_voice", android.content.Context.MODE_PRIVATE)
+                                    .edit().putBoolean(OrinVoice.PREF_ORB_ENABLED, enabled).apply()
+                                if (enabled) OrinVoiceService.refresh(context) else OrinVoiceService.stop(context)
+                            }
+                        },
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Voice language",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = scheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OrinVoice.languages().forEach { (tag, label) ->
+                            val selected = voiceLanguage == tag
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) scheme.primary else scheme.surfaceContainerLow)
+                                    .border(1.dp, if (selected) scheme.primary else scheme.outlineVariant, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        voiceLanguage = tag
+                                        keys.setVoiceLanguage(tag)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                            ) {
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (selected) Color.White else scheme.onSurface,
+                                )
+                            }
+                        }
                     }
                 }
             }

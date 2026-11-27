@@ -1,9 +1,13 @@
 package com.orin.app
 
+import android.Manifest
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalNavigationDrawer
@@ -11,6 +15,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -32,6 +39,8 @@ import com.orin.app.ui.onboarding.OrinOnboardingScreen
 import com.orin.app.ui.ops.OrinOpsScreen
 import com.orin.app.ui.settings.OrinSettingsScreen
 import com.orin.app.ui.theme.OrinTheme
+import com.orin.app.voice.OrinVoice
+import com.orin.app.voice.OrinVoiceController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -45,15 +54,28 @@ import java.time.ZoneId
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
+
+    private var pendingVoiceAction by mutableStateOf<String?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        pendingVoiceAction = intent.action
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        pendingVoiceAction = intent.action
         val runtime = (application as OrinApp).runtime
         setContent {
             OrinTheme {
                 var configured by remember { mutableStateOf(runtime.keys.hasApiKey()) }
                 if (configured) {
-                    OrinRootShell(runtime)
+                    OrinRootShell(
+                        runtime = runtime,
+                        initialVoiceAction = pendingVoiceAction,
+                        onVoiceActionConsumed = { pendingVoiceAction = null },
+                    )
                 } else {
                     OrinOnboardingScreen(
                         keys = runtime.keys,
@@ -66,7 +88,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun OrinRootShell(runtime: OrinAgentRuntime) {
+private fun OrinRootShell(
+    runtime: OrinAgentRuntime,
+    initialVoiceAction: String?,
+    onVoiceActionConsumed: () -> Unit,
+) {
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -82,6 +108,23 @@ private fun OrinRootShell(runtime: OrinAgentRuntime) {
 
     var approvalRequest by remember { mutableStateOf<ToolApprovalRequest?>(null) }
     var approvalDeferred by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
+
+    val context = LocalContext.current
+    val voice = remember { OrinVoiceController(context) }
+    var voiceMode by remember { mutableStateOf(false) }
+    var isListening by remember { mutableStateOf(false) }
+    var interimText by remember { mutableStateOf("") }
+
+    var onVoicePermissionGranted by remember { mutableStateOf<() -> Unit>({}) }
+    val voicePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        if (results[Manifest.permission.RECORD_AUDIO] == true) onVoicePermissionGranted()
+    }
+
+    DisposableEffect(voice) {
+        onDispose { voice.release() }
+    }
 
     val drawerChats = remember(dbConversations) {
         dbConversations.map {
@@ -121,6 +164,34 @@ private fun OrinRootShell(runtime: OrinAgentRuntime) {
         lastPrompt = null
     }
 
+    suspend fun startListening() {
+        if (!voice.hasRecordPermission) {
+            voicePermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ),
+            )
+            return
+        }
+        voice.initSpeaker()
+        voice.setLanguage(runtime.keys.voiceLanguage())
+        voiceMode = true
+        isListening = voice.startListening()
+        interimText = ""
+    }
+
+    onVoicePermissionGranted = { scope.launch { startListening() } }
+
+    fun toggleVoice() {
+        if (isListening) {
+            voice.stopListening()
+            isListening = false
+        } else {
+            scope.launch { startListening() }
+        }
+    }
+
     fun sendPrompt(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty() || isStreaming) return
@@ -130,7 +201,7 @@ private fun OrinRootShell(runtime: OrinAgentRuntime) {
             isStreaming = true
             streamingReply = ""
             try {
-                runtime.runTurn(
+                val reply = runtime.runTurn(
                     conversationId = chatId,
                     userText = prompt,
                     onUpdate = { full ->
@@ -145,6 +216,9 @@ private fun OrinRootShell(runtime: OrinAgentRuntime) {
                         deferred.await()
                     },
                 )
+                if (voiceMode && runtime.keys.speakReplies()) {
+                    voice.speakReply(reply)
+                }
                 lastPrompt = null
             } catch (e: CancellationException) {
                 // runTurn persists the partial reply; keep the UI consistent.
@@ -158,6 +232,38 @@ private fun OrinRootShell(runtime: OrinAgentRuntime) {
                     approvalRequest = null
                     approvalDeferred = null
                 }
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        voice.partial.collect { interimText = it }
+    }
+
+    LaunchedEffect(Unit) {
+        voice.final.collect { text ->
+            isListening = false
+            interimText = ""
+            if (text.isNotBlank()) sendPrompt(text)
+        }
+    }
+
+    LaunchedEffect(initialVoiceAction) {
+        when (initialVoiceAction) {
+            OrinVoice.ACTION_VOICE -> {
+                onVoiceActionConsumed()
+                navController.navigate("chat") { launchSingleTop = true }
+                startListening()
+            }
+            OrinVoice.ACTION_TYPE -> {
+                onVoiceActionConsumed()
+                navController.navigate("chat") { launchSingleTop = true }
+            }
+            OrinVoice.ACTION_STOP -> {
+                onVoiceActionConsumed()
+                voice.stopListening()
+                voice.stopSpeaking()
+                isListening = false
             }
         }
     }
@@ -211,6 +317,10 @@ private fun OrinRootShell(runtime: OrinAgentRuntime) {
                     activeModelLabel = runtime.keys.activeModel(),
                     isStreaming = isStreaming,
                     canRetry = lastPrompt != null && !isStreaming,
+                    voiceMode = voiceMode,
+                    isListening = isListening,
+                    interimText = interimText,
+                    onVoiceToggle = { toggleVoice() },
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     onPickModel = { navController.navigate("settings") },
                     onNewChat = { newChat() },

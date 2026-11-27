@@ -38,6 +38,15 @@ object OrinPermissions {
                 Manifest.permission.SEND_SMS,
             ),
         ),
+        PermissionGroup(
+            id = "voice",
+            title = "Microphone",
+            rationale = "Speak to Orin offline. Audio is processed on your device and never uploaded.",
+            permissions = listOf(
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ),
+        ),
     )
 
     fun isGranted(context: Context, group: PermissionGroup): Boolean =

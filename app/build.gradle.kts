@@ -1,4 +1,5 @@
 import java.io.FileInputStream
+import java.security.MessageDigest
 import java.util.Properties
 
 plugins {
@@ -16,16 +17,47 @@ val keystoreProperties = Properties().apply {
     }
 }
 
+/**
+ * Vosk's small Indian-English model is ~36 MB, so it is downloaded once at
+ * build time and verified against a pinned SHA-256 before it is unpacked into
+ * main assets. This keeps the model out of git while making builds reproducible.
+ */
+val voskModelName = "vosk-model-small-en-in-0.4"
+val voskSha256 = "20663dcac4d5cb783a579c54d98339344a688e4ec6e1b4a4b059fd1235454cc7"
+val voskAssetsDir = layout.buildDirectory.dir("generated/vosk-assets")
+
+val fetchVoskModel by tasks.registering {
+    outputs.dir(voskAssetsDir)
+    doLast {
+        val destination = voskAssetsDir.get().asFile
+        if (File(destination, "vosk/am/final.mdl").exists()) return@doLast
+        destination.mkdirs()
+        val archive = temporaryDir.resolve("$voskModelName.zip")
+        uri("https://alphacephei.com/vosk/models/$voskModelName.zip").toURL()
+            .openStream().use { input -> archive.outputStream().use { input.copyTo(it) } }
+        val digest = MessageDigest.getInstance("SHA-256").digest(archive.readBytes())
+            .joinToString("") { "%02x".format(it) }
+        check(digest == voskSha256) {
+            "Vosk model checksum mismatch. Expected $voskSha256, got $digest"
+        }
+        copy {
+            from(zipTree(archive))
+            into(destination)
+            eachFile { path = path.replaceFirst(voskModelName, "vosk") }
+        }
+    }
+}
+
 android {
     namespace = "com.orin.app"
     compileSdk = 37
 
     defaultConfig {
         applicationId = "com.orin.app"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -90,12 +122,18 @@ android {
         )
     }
 
+    sourceSets {
+        getByName("main").assets.srcDir(voskAssetsDir.get().asFile)
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
 }
+
+tasks.named("preBuild") { dependsOn(fetchVoskModel) }
 
 /**
  * Refuse to produce a release artifact that is not signed. Shipping an unsigned
@@ -134,6 +172,7 @@ dependencies {
 
     implementation(libs.security.crypto)
     implementation(libs.okhttp)
+    implementation(libs.vosk.android)
 
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
