@@ -68,6 +68,15 @@ class KeyStoreManager(context: Context) {
     fun speakReplies(): Boolean = getSecret("speak_replies") != "false"
     fun setSpeakReplies(enabled: Boolean) = putSecret("speak_replies", enabled.toString())
 
+    fun geminiLiveEnabled(): Boolean = getSecret("gemini_live_enabled") == "true"
+    fun setGeminiLiveEnabled(enabled: Boolean) = putSecret("gemini_live_enabled", enabled.toString())
+
+    fun liveModel(): String = getSecret("gemini_live_model") ?: "gemini-3.1-flash-live-preview"
+    fun setLiveModel(model: String) = putSecret("gemini_live_model", model)
+
     fun biometricGateEnabled(): Boolean = getSecret("biometric_gate") == "true"
     fun setBiometricGateEnabled(enabled: Boolean) = putSecret("biometric_gate", enabled.toString())
+
+    fun themeStyle(): String = getSecret("theme_style") ?: "warm"
+    fun setThemeStyle(style: String) = putSecret("theme_style", style)
 }

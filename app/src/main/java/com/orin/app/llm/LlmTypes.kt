@@ -5,12 +5,22 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class LlmAttachment(
+    val name: String,
+    val mimeType: String,
+    val base64Data: String,
+)
+
 data class LlmTurnMessage(
     val role: String, // "user" | "assistant" | "tool"
     val content: String,
     val toolCalls: List<LlmToolCall> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
+    val attachments: List<LlmAttachment> = emptyList(),
 )
 
 data class LlmToolDeclaration(

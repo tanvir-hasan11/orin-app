@@ -159,6 +159,14 @@ class OrinLlmClient(
                             put("role", "user")
                             put("parts", buildJsonArray {
                                 add(buildJsonObject { put("text", msg.content) })
+                                for (att in msg.attachments) {
+                                    add(buildJsonObject {
+                                        putJsonObject("inlineData") {
+                                            put("mimeType", att.mimeType)
+                                            put("data", att.base64Data)
+                                        }
+                                    })
+                                }
                             })
                         })
                     }
@@ -288,9 +296,29 @@ class OrinLlmClient(
                     i++
                 }
                 else -> {
-                    anthropicMessages += buildJsonObject {
-                        put("role", "user")
-                        put("content", message.content)
+                    if (message.attachments.isEmpty()) {
+                        anthropicMessages += buildJsonObject {
+                            put("role", "user")
+                            put("content", message.content)
+                        }
+                    } else {
+                        anthropicMessages += buildJsonObject {
+                            put("role", "user")
+                            put("content", buildJsonArray {
+                                add(buildJsonObject { put("type", "text"); put("text", message.content) })
+                                for (att in message.attachments) {
+                                    val blockType = if (att.mimeType.startsWith("image/")) "image" else "document"
+                                    add(buildJsonObject {
+                                        put("type", blockType)
+                                        putJsonObject("source") {
+                                            put("type", "base64")
+                                            put("media_type", att.mimeType)
+                                            put("data", att.base64Data)
+                                        }
+                                    })
+                                }
+                            })
+                        }
                     }
                     i++
                 }
@@ -418,7 +446,25 @@ class OrinLlmClient(
                         })
                         else -> add(buildJsonObject {
                             put("role", "user")
-                            put("content", message.content)
+                            val imgAtts = message.attachments.filter { it.mimeType.startsWith("image/") }
+                            if (imgAtts.isEmpty()) {
+                                val note = if (message.attachments.isNotEmpty()) {
+                                    "\n[Attached files: ${message.attachments.joinToString { it.name }}]"
+                                } else ""
+                                put("content", message.content + note)
+                            } else {
+                                put("content", buildJsonArray {
+                                    add(buildJsonObject { put("type", "text"); put("text", message.content) })
+                                    for (att in imgAtts) {
+                                        add(buildJsonObject {
+                                            put("type", "image_url")
+                                            putJsonObject("image_url") {
+                                                put("url", "data:${att.mimeType};base64,${att.base64Data}")
+                                            }
+                                        })
+                                    }
+                                })
+                            }
                         })
                     }
                 }

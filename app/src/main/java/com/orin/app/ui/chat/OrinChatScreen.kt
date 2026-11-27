@@ -1,5 +1,7 @@
 package com.orin.app.ui.chat
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,14 +31,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.automirrored.outlined.TrendingUp
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.CalendarToday
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Stop
-import androidx.compose.material.icons.outlined.TrendingUp
 import androidx.compose.material.icons.outlined.WbSunny
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,13 +61,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.orin.app.agent.AttachmentCodec
+import com.orin.app.llm.LlmAttachment
 import com.orin.app.ui.components.OrinSunburstMark
+import kotlinx.coroutines.launch
 import java.time.LocalTime
 
 data class OrinUiMessage(
@@ -69,6 +79,7 @@ data class OrinUiMessage(
     val isUser: Boolean,
     val text: String,
     val toolSummary: String? = null,
+    val attachmentNames: List<String> = emptyList(),
 )
 
 @Composable
@@ -80,17 +91,40 @@ fun OrinChatScreen(
     voiceMode: Boolean,
     isListening: Boolean,
     interimText: String,
+    liveStatus: String? = null,
     onVoiceToggle: () -> Unit,
+    onInterruptLive: () -> Unit = {},
     onOpenDrawer: () -> Unit,
     onPickModel: () -> Unit,
     onNewChat: () -> Unit,
-    onSendMessage: (String) -> Unit,
+    onSendMessage: (String, List<LlmAttachment>) -> Unit,
+    onPreviewSnippet: (title: String, content: String, isMermaid: Boolean) -> Unit = { _, _, _ -> },
     onStop: () -> Unit,
     onRetry: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var inputText by rememberSaveable { mutableStateOf("") }
+    var pendingAttachments by remember { mutableStateOf<List<LlmAttachment>>(emptyList()) }
+    var attachmentError by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
+
+    val docPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            val loaded = mutableListOf<LlmAttachment>()
+            for (uri in uris.take(4)) {
+                AttachmentCodec.loadFromUri(context, uri).fold(
+                    onSuccess = { loaded.add(it); attachmentError = null },
+                    onFailure = { attachmentError = it.message },
+                )
+            }
+            if (loaded.isNotEmpty()) pendingAttachments = (pendingAttachments + loaded).take(4)
+        }
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
@@ -114,7 +148,6 @@ fun OrinChatScreen(
                     Icon(Icons.Outlined.Menu, contentDescription = "Menu", tint = scheme.onSurface)
                 }
 
-                // Centered Claude-style model selector pill
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
@@ -136,13 +169,12 @@ fun OrinChatScreen(
                     )
                 }
 
-                IconButton(onClick = { inputText = ""; onNewChat() }) {
+                IconButton(onClick = { inputText = ""; pendingAttachments = emptyList(); onNewChat() }) {
                     Icon(Icons.Outlined.EditNote, contentDescription = "New Chat", tint = scheme.onSurface)
                 }
             }
         },
         bottomBar = {
-            // Floating Claude-style warm composer
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -150,6 +182,61 @@ fun OrinChatScreen(
                     .navigationBarsPadding()
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {
+                if (liveStatus != null) {
+                    Text(
+                        text = liveStatus,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = scheme.primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(scheme.primaryContainer.copy(alpha = 0.5f))
+                            .clickable(onClick = onInterruptLive)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+                if (attachmentError != null) {
+                    Text(
+                        text = attachmentError!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.error,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
+                if (pendingAttachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        pendingAttachments.forEachIndexed { idx, att ->
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(scheme.surfaceContainerLow)
+                                    .border(1.dp, scheme.outlineVariant, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(att.name.take(24), style = MaterialTheme.typography.labelSmall, color = scheme.onSurface)
+                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    Icons.Outlined.Close,
+                                    contentDescription = "Remove",
+                                    tint = scheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable {
+                                            pendingAttachments = pendingAttachments.filterIndexed { i, _ -> i != idx }
+                                        },
+                                )
+                            }
+                        }
+                    }
+                }
                 if (canRetry) {
                     Text(
                         text = "Last request failed. Tap to retry.",
@@ -207,24 +294,40 @@ fun OrinChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (isListening) scheme.primary
-                                    else if (voiceMode) scheme.primaryContainer
-                                    else scheme.surfaceContainerHigh,
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isListening) scheme.primary
+                                        else if (voiceMode) scheme.primaryContainer
+                                        else scheme.surfaceContainerHigh,
+                                    )
+                                    .clickable(onClick = onVoiceToggle),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Mic,
+                                    contentDescription = if (isListening) "Stop listening" else "Speak to Orin",
+                                    tint = if (isListening) Color.White else scheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
                                 )
-                                .clickable(onClick = onVoiceToggle),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Outlined.Mic,
-                                contentDescription = if (isListening) "Stop listening" else "Speak to Orin",
-                                tint = if (isListening) Color.White else scheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .clickable { docPicker.launch(arrayOf("image/*", "application/pdf")) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Outlined.AttachFile,
+                                    contentDescription = "Attach image or PDF",
+                                    tint = scheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
                         }
 
                         if (isStreaming) {
@@ -244,16 +347,18 @@ fun OrinChatScreen(
                                 )
                             }
                         } else {
-                            val canSend = inputText.isNotBlank()
+                            val canSend = inputText.isNotBlank() || pendingAttachments.isNotEmpty()
                             Box(
                                 modifier = Modifier
                                     .size(34.dp)
                                     .clip(CircleShape)
                                     .background(if (canSend) scheme.primary else scheme.outlineVariant)
                                     .clickable(enabled = canSend) {
-                                        val message = inputText.trim()
+                                        val message = inputText.trim().ifBlank { "Describe or inspect these attached files." }
+                                        val atts = pendingAttachments
                                         inputText = ""
-                                        onSendMessage(message)
+                                        pendingAttachments = emptyList()
+                                        onSendMessage(message, atts)
                                     },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -275,7 +380,7 @@ fun OrinChatScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
-                onSuggestionTap = onSendMessage,
+                onSuggestionTap = { prompt -> onSendMessage(prompt, emptyList()) },
             )
         } else {
             LazyColumn(
@@ -292,41 +397,43 @@ fun OrinChatScreen(
                             modifier = Modifier.fillMaxWidth(),
                             contentAlignment = Alignment.CenterEnd,
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .widthIn(max = 310.dp)
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(scheme.surfaceContainerHigh)
-                                    .padding(horizontal = 15.dp, vertical = 10.dp),
+                            Column(
+                                horizontalAlignment = Alignment.End,
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                Text(
-                                    text = msg.text,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = scheme.onSurface,
-                                )
+                                if (msg.attachmentNames.isNotEmpty()) {
+                                    Text(
+                                        text = msg.attachmentNames.joinToString(" · "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = scheme.primary,
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .widthIn(max = 310.dp)
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .background(scheme.surfaceContainerHigh)
+                                        .padding(horizontal = 15.dp, vertical = 10.dp),
+                                ) {
+                                    Text(
+                                        text = msg.text,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = scheme.onSurface,
+                                    )
+                                }
                             }
                         }
                     } else {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            if (msg.toolSummary != null) {
-                                Text(
-                                    text = msg.toolSummary,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = scheme.onSurfaceVariant,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(scheme.surfaceContainerLow)
-                                        .border(1.dp, scheme.outlineVariant, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                                )
+                            if (!msg.toolSummary.isNullOrBlank()) {
+                                CollapsibleToolCard(msg.toolSummary)
                             }
-                            Text(
-                                text = msg.text,
-                                style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
-                                color = scheme.onSurface,
+                            RichMarkdownContent(
+                                markdown = msg.text,
+                                onPreviewSnippet = onPreviewSnippet,
                             )
                         }
                     }
@@ -369,7 +476,6 @@ private fun ClaudeEmptyHome(
         )
         Spacer(Modifier.height(24.dp))
 
-        // Clean 1-row Claude-style suggestion pills
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -379,7 +485,7 @@ private fun ClaudeEmptyHome(
             SuggestionPill(Icons.Outlined.WbSunny, "Morning Brief") {
                 onSuggestionTap("Run my morning brief")
             }
-            SuggestionPill(Icons.Outlined.TrendingUp, "Meta Ads") {
+            SuggestionPill(Icons.AutoMirrored.Outlined.TrendingUp, "Meta Ads") {
                 onSuggestionTap("Summarize my Meta Ads spend and campaigns")
             }
             SuggestionPill(Icons.Outlined.CalendarToday, "Calendar") {

@@ -1,9 +1,11 @@
 package com.orin.app
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
@@ -25,11 +27,21 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.orin.app.agent.OrinAgentRuntime
 import com.orin.app.agent.ToolApprovalRequest
+import com.orin.app.live.LivePhase
+import com.orin.app.live.OrinLiveSession
+import com.orin.app.llm.LlmAttachment
+import com.orin.app.local.Habits
+import com.orin.app.local.LocalActions
+import com.orin.app.local.LocalCommand
+import com.orin.app.local.LocalRouter
+import com.orin.app.notify.NotificationReplies
+import com.orin.app.security.BiometricGate
 import com.orin.app.ui.chat.OrinChatScreen
 import com.orin.app.ui.chat.OrinUiMessage
 import com.orin.app.ui.code.OrinCodeScreen
@@ -37,10 +49,14 @@ import com.orin.app.ui.drawer.DrawerChatSummary
 import com.orin.app.ui.drawer.OrinDrawer
 import com.orin.app.ui.onboarding.OrinOnboardingScreen
 import com.orin.app.ui.ops.OrinOpsScreen
+import com.orin.app.ui.preview.OrinWebPreviewScreen
+import com.orin.app.ui.preview.PreviewTarget
 import com.orin.app.ui.settings.OrinSettingsScreen
 import com.orin.app.ui.theme.OrinTheme
+import kotlinx.serialization.json.Json
 import com.orin.app.voice.OrinVoice
 import com.orin.app.voice.OrinVoiceController
+import com.orin.app.work.BriefNotificationHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -51,30 +67,42 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.Calendar
 import java.util.UUID
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private var pendingVoiceAction by mutableStateOf<String?>(null)
+    private var pendingPrompt by mutableStateOf<String?>(null)
+    private var pendingOpenOps by mutableStateOf(false)
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        pendingVoiceAction = intent.action
+        handleIncomingIntent(intent)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        pendingVoiceAction = intent.action
+        handleIncomingIntent(intent)
         val runtime = (application as OrinApp).runtime
         setContent {
-            OrinTheme {
+            var themeStyle by remember { mutableStateOf(runtime.keys.themeStyle()) }
+            OrinTheme(themeStyle = themeStyle) {
                 var configured by remember { mutableStateOf(runtime.keys.hasApiKey()) }
                 if (configured) {
                     OrinRootShell(
+                        activity = this@MainActivity,
                         runtime = runtime,
                         initialVoiceAction = pendingVoiceAction,
-                        onVoiceActionConsumed = { pendingVoiceAction = null },
+                        initialPrompt = pendingPrompt,
+                        initialOpenOps = pendingOpenOps,
+                        onThemeChanged = { themeStyle = it },
+                        onVoiceActionConsumed = {
+                            pendingVoiceAction = null
+                            pendingPrompt = null
+                            pendingOpenOps = false
+                        },
                     )
                 } else {
                     OrinOnboardingScreen(
@@ -85,12 +113,46 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.getBooleanExtra(BriefNotificationHelper.EXTRA_NAVIGATE_OPS, false)) {
+            pendingOpenOps = true
+        }
+        if (intent.action == Intent.ACTION_ASSIST) {
+            val micAllowed = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!micAllowed) return
+            val keyguard = getSystemService(KeyguardManager::class.java)
+            if (keyguard?.isKeyguardLocked == true) {
+                keyguard.requestDismissKeyguard(
+                    this,
+                    object : KeyguardManager.KeyguardDismissCallback() {
+                        override fun onDismissSucceeded() {
+                            pendingVoiceAction = OrinVoice.ACTION_VOICE
+                        }
+                    },
+                )
+            } else {
+                pendingVoiceAction = OrinVoice.ACTION_VOICE
+            }
+            return
+        }
+        pendingVoiceAction = intent.action
+        pendingPrompt = intent.getStringExtra(OrinVoice.EXTRA_PROMPT)
+    }
 }
 
 @Composable
 private fun OrinRootShell(
+    activity: FragmentActivity,
     runtime: OrinAgentRuntime,
     initialVoiceAction: String?,
+    initialPrompt: String?,
+    initialOpenOps: Boolean,
+    onThemeChanged: (String) -> Unit,
     onVoiceActionConsumed: () -> Unit,
 ) {
     val navController = rememberNavController()
@@ -108,12 +170,38 @@ private fun OrinRootShell(
 
     var approvalRequest by remember { mutableStateOf<ToolApprovalRequest?>(null) }
     var approvalDeferred by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
+    var previewTarget by remember { mutableStateOf<PreviewTarget?>(null) }
 
     val context = LocalContext.current
     val voice = remember { OrinVoiceController(context) }
+    val habits = remember { Habits.get(context) }
+    val localActions = remember { LocalActions(context) }
     var voiceMode by remember { mutableStateOf(false) }
     var isListening by remember { mutableStateOf(false) }
     var interimText by remember { mutableStateOf("") }
+
+    suspend fun requestUiApproval(request: ToolApprovalRequest): Boolean {
+        val deferred = CompletableDeferred<Boolean>()
+        withContext(Dispatchers.Main) {
+            approvalRequest = request
+            approvalDeferred = deferred
+        }
+        val approved = deferred.await()
+        if (!approved) return false
+        if (runtime.keys.biometricGateEnabled() &&
+            BiometricGate.requiresHardwareAuth(request.title, request.detail)
+        ) {
+            return BiometricGate.authenticate(
+                activity = activity,
+                title = "Confirm ${request.title}",
+                subtitle = request.detail,
+            )
+        }
+        return true
+    }
+
+    val liveSession = remember { OrinLiveSession(context, runtime, ::requestUiApproval) }
+    val liveState by liveSession.state.collectAsState()
 
     var onVoicePermissionGranted by remember { mutableStateOf<() -> Unit>({}) }
     val voicePermissionLauncher = rememberLauncherForActivityResult(
@@ -122,8 +210,11 @@ private fun OrinRootShell(
         if (results[Manifest.permission.RECORD_AUDIO] == true) onVoicePermissionGranted()
     }
 
-    DisposableEffect(voice) {
-        onDispose { voice.release() }
+    DisposableEffect(voice, liveSession) {
+        onDispose {
+            voice.release()
+            liveSession.release()
+        }
     }
 
     val drawerChats = remember(dbConversations) {
@@ -135,12 +226,16 @@ private fun OrinRootShell(
     val uiMessages = remember(dbMessages, streamingReply) {
         buildList {
             for (message in dbMessages) {
+                val atts = message.attachmentsJson?.let { raw ->
+                    runCatching { Json.decodeFromString<List<String>>(raw) }.getOrNull()
+                }.orEmpty()
                 add(
                     OrinUiMessage(
                         id = message.id,
                         isUser = message.isUser,
                         text = message.text,
                         toolSummary = message.toolSummary,
+                        attachmentNames = atts,
                     ),
                 )
             }
@@ -158,6 +253,7 @@ private fun OrinRootShell(
 
     fun newChat() {
         turnJob?.cancel()
+        liveSession.stop()
         activeChatId = UUID.randomUUID().toString()
         streamingReply = null
         isStreaming = false
@@ -174,6 +270,11 @@ private fun OrinRootShell(
             )
             return
         }
+        if (runtime.keys.geminiLiveEnabled()) {
+            voiceMode = true
+            liveSession.start(activeChatId)
+            return
+        }
         voice.initSpeaker()
         voice.setLanguage(runtime.keys.voiceLanguage())
         voiceMode = true
@@ -184,6 +285,14 @@ private fun OrinRootShell(
     onVoicePermissionGranted = { scope.launch { startListening() } }
 
     fun toggleVoice() {
+        if (runtime.keys.geminiLiveEnabled()) {
+            when {
+                liveState.phase == LivePhase.Speaking -> liveSession.interrupt()
+                liveSession.active -> liveSession.stop()
+                else -> scope.launch { startListening() }
+            }
+            return
+        }
         if (isListening) {
             voice.stopListening()
             isListening = false
@@ -192,10 +301,34 @@ private fun OrinRootShell(
         }
     }
 
-    fun sendPrompt(text: String) {
+    fun sendPrompt(text: String, fromVoice: Boolean = false, attachments: List<LlmAttachment> = emptyList()) {
         val prompt = text.trim()
-        if (prompt.isEmpty() || isStreaming) return
+        if ((prompt.isEmpty() && attachments.isEmpty()) || isStreaming) return
+        NotificationReplies.heard(prompt)
         val chatId = activeChatId
+        if (fromVoice) {
+            val localCmd = LocalRouter.match(prompt) ?: habits.lookup(listOf(prompt))
+            if (localCmd == LocalCommand.Stop) {
+                voice.stopListening()
+                voice.stopSpeaking()
+                isListening = false
+                return
+            }
+            if (localCmd != null) {
+                val res = runCatching { localActions.run(localCmd) }.getOrNull()
+                if (res != null && !res.handOff) {
+                    habits.record(localCmd, Calendar.getInstance().get(Calendar.HOUR_OF_DAY))
+                    scope.launch {
+                        runtime.recordLocalExchange(chatId, prompt, res.reply, localCmd.javaClass.simpleName)
+                        if (voiceMode && runtime.keys.speakReplies()) {
+                            voice.speakReply(res.reply)
+                        }
+                    }
+                    return
+                }
+            }
+            habits.expect(prompt)
+        }
         lastPrompt = prompt
         turnJob = scope.launch {
             isStreaming = true
@@ -204,17 +337,11 @@ private fun OrinRootShell(
                 val reply = runtime.runTurn(
                     conversationId = chatId,
                     userText = prompt,
+                    attachments = attachments,
                     onUpdate = { full ->
                         streamingReply = full.ifEmpty { null }
                     },
-                    onApproval = { request ->
-                        val deferred = CompletableDeferred<Boolean>()
-                        withContext(Dispatchers.Main) {
-                            approvalRequest = request
-                            approvalDeferred = deferred
-                        }
-                        deferred.await()
-                    },
+                    onApproval = ::requestUiApproval,
                 )
                 if (voiceMode && runtime.keys.speakReplies()) {
                     voice.speakReply(reply)
@@ -244,7 +371,7 @@ private fun OrinRootShell(
         voice.final.collect { text ->
             isListening = false
             interimText = ""
-            if (text.isNotBlank()) sendPrompt(text)
+            if (text.isNotBlank()) sendPrompt(text, fromVoice = true)
         }
     }
 
@@ -255,7 +382,12 @@ private fun OrinRootShell(
         }
     }
 
-    LaunchedEffect(initialVoiceAction) {
+    LaunchedEffect(initialVoiceAction, initialPrompt, initialOpenOps) {
+        if (initialOpenOps) {
+            onVoiceActionConsumed()
+            navController.navigate("ops") { launchSingleTop = true }
+            return@LaunchedEffect
+        }
         when (initialVoiceAction) {
             OrinVoice.ACTION_VOICE -> {
                 onVoiceActionConsumed()
@@ -263,11 +395,14 @@ private fun OrinRootShell(
                 startListening()
             }
             OrinVoice.ACTION_TYPE -> {
+                val prompt = initialPrompt
                 onVoiceActionConsumed()
                 navController.navigate("chat") { launchSingleTop = true }
+                if (!prompt.isNullOrBlank()) sendPrompt(prompt, fromVoice = true)
             }
             OrinVoice.ACTION_STOP -> {
                 onVoiceActionConsumed()
+                liveSession.stop()
                 voice.stopListening()
                 voice.stopSpeaking()
                 isListening = false
@@ -319,19 +454,49 @@ private fun OrinRootShell(
             startDestination = "chat",
         ) {
             composable("chat") {
+                val liveStatus = when (liveState.phase) {
+                    LivePhase.Connecting -> "Gemini Live · Connecting…"
+                    LivePhase.Listening -> listOfNotNull(
+                        "Gemini Live · Listening",
+                        liveState.userCaption.takeIf { it.isNotBlank() }?.takeLast(60),
+                    ).joinToString(" — ")
+                    LivePhase.Speaking -> listOfNotNull(
+                        "Gemini Live · Speaking (tap to interrupt)",
+                        liveState.assistantCaption.takeIf { it.isNotBlank() }?.takeLast(60),
+                    ).joinToString(" — ")
+                    LivePhase.Off -> liveState.problem
+                }
                 OrinChatScreen(
                     messages = uiMessages,
                     activeModelLabel = runtime.keys.activeModel(),
                     isStreaming = isStreaming,
                     canRetry = lastPrompt != null && !isStreaming,
-                    voiceMode = voiceMode,
-                    isListening = isListening,
+                    voiceMode = voiceMode || liveSession.active,
+                    isListening = isListening || liveState.phase == LivePhase.Listening || liveState.phase == LivePhase.Connecting,
                     interimText = interimText,
+                    liveStatus = liveStatus,
                     onVoiceToggle = { toggleVoice() },
+                    onInterruptLive = { liveSession.interrupt() },
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     onPickModel = { navController.navigate("settings") },
                     onNewChat = { newChat() },
-                    onSendMessage = { text -> sendPrompt(text) },
+                    onSendMessage = { text, atts -> sendPrompt(text, attachments = atts) },
+                    onPreviewSnippet = { title, content, isMermaid ->
+                        val html = if (isMermaid) {
+                            """
+                            <!DOCTYPE html><html><body style="background:#0f172a;color:#f8fafc;padding:16px;font-family:sans-serif">
+                            <pre class="mermaid">$content</pre>
+                            <script type="module">
+                            import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+                            mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+                            </script></body></html>
+                            """.trimIndent()
+                        } else {
+                            content
+                        }
+                        previewTarget = PreviewTarget(title = title, html = html)
+                        navController.navigate("preview") { launchSingleTop = true }
+                    },
                     onStop = {
                         turnJob?.cancel()
                         lastPrompt = null
@@ -350,11 +515,25 @@ private fun OrinRootShell(
                 )
             }
             composable("code") {
-                OrinCodeScreen(runtime = runtime, onBack = { navController.popBackStack() })
+                OrinCodeScreen(
+                    runtime = runtime,
+                    onBack = { navController.popBackStack() },
+                    onOpenPreviewUrl = { title, url ->
+                        previewTarget = PreviewTarget(title = title, url = url)
+                        navController.navigate("preview") { launchSingleTop = true }
+                    },
+                )
+            }
+            composable("preview") {
+                OrinWebPreviewScreen(
+                    target = previewTarget ?: PreviewTarget("Preview", html = "<p>No preview loaded.</p>"),
+                    onBack = { navController.popBackStack() },
+                )
             }
             composable("settings") {
                 OrinSettingsScreen(
                     runtime = runtime,
+                    onThemeChanged = onThemeChanged,
                     onBack = { navController.popBackStack() },
                     onDataCleared = {
                         newChat()

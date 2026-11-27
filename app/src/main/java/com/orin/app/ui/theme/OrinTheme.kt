@@ -23,6 +23,15 @@ object OrinPalette {
     val LightText = Color(0xFF1A1917)
     val LightMuted = Color(0xFF6B675E)
     val TerracottaLight = Color(0xFFC96442)
+
+    val ObsidianBg = Color(0xFF0A0E17)
+    val ObsidianSurface = Color(0xFF111827)
+    val ObsidianElevated = Color(0xFF1F2937)
+    val ObsidianBorder = Color(0xFF334155)
+    val ObsidianText = Color(0xFFF8FAFC)
+    val ObsidianMuted = Color(0xFF94A3B8)
+    val ElectricCyan = Color(0xFF06B6D4)
+    val AmberGold = Color(0xFFF59E0B)
 }
 
 private val OrinDarkScheme = darkColorScheme(
@@ -69,13 +78,42 @@ private val OrinLightScheme = lightColorScheme(
     outlineVariant = OrinPalette.LightBorder,
 )
 
+private val OrinObsidianScheme = darkColorScheme(
+    primary = OrinPalette.ElectricCyan,
+    onPrimary = Color(0xFF04131A),
+    primaryContainer = Color(0xFF0E3A47),
+    onPrimaryContainer = Color(0xFFCFFAFE),
+    secondary = OrinPalette.AmberGold,
+    onSecondary = Color(0xFF1F1300),
+    secondaryContainer = OrinPalette.ObsidianElevated,
+    onSecondaryContainer = OrinPalette.ObsidianText,
+    tertiary = OrinPalette.AmberGold,
+    background = OrinPalette.ObsidianBg,
+    onBackground = OrinPalette.ObsidianText,
+    surface = OrinPalette.ObsidianBg,
+    onSurface = OrinPalette.ObsidianText,
+    surfaceContainerLow = OrinPalette.ObsidianSurface,
+    surfaceContainer = OrinPalette.ObsidianSurface,
+    surfaceContainerHigh = OrinPalette.ObsidianElevated,
+    surfaceVariant = OrinPalette.ObsidianElevated,
+    onSurfaceVariant = OrinPalette.ObsidianMuted,
+    outline = OrinPalette.ObsidianBorder,
+    outlineVariant = OrinPalette.ObsidianBorder,
+)
+
 @Composable
 fun OrinTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    themeStyle: String = "warm",
     content: @Composable () -> Unit,
 ) {
+    val scheme = when {
+        themeStyle == "obsidian" -> OrinObsidianScheme
+        darkTheme -> OrinDarkScheme
+        else -> OrinLightScheme
+    }
     MaterialTheme(
-        colorScheme = if (darkTheme) OrinDarkScheme else OrinLightScheme,
+        colorScheme = scheme,
         content = content,
     )
 }

@@ -4,8 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.CalendarContract
+import android.telephony.PhoneNumberUtils
+import android.telephony.TelephonyManager
 import com.orin.app.agent.OrinTool
 import com.orin.app.agent.ToolApprovalRequest
+import com.orin.app.control.OrinControlService
 import com.orin.app.data.AuditLogEntity
 import com.orin.app.data.OrinDao
 import kotlinx.serialization.json.JsonObject
@@ -14,6 +17,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import java.util.Locale
 import java.util.UUID
 
 /**
@@ -55,14 +59,19 @@ class PhoneIntentsTool(
                 Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number"))
             }
             "whatsapp" -> {
-                val number = recipient(args).filter { it.isDigit() || it == '+' }
+                val rawNumber = recipient(args)
                 val body = text(args)
-                if (number.isBlank()) return "Provide a 'recipient' phone number."
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    `package` = "com.whatsapp"
-                    putExtra(Intent.EXTRA_TEXT, body)
-                    data = Uri.parse("https://api.whatsapp.com/send?phone=$number")
+                if (rawNumber.isBlank()) return "Provide a 'recipient' phone number."
+                val digits = internationalDigits(rawNumber)
+                if (digits != null) {
+                    val link = Uri.parse("https://api.whatsapp.com/send?phone=$digits&text=${Uri.encode(body)}")
+                    Intent(Intent.ACTION_VIEW, link)
+                } else {
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        `package` = "com.whatsapp"
+                        putExtra(Intent.EXTRA_TEXT, body)
+                    }
                 }
             }
             "sms" -> {
@@ -120,4 +129,13 @@ class PhoneIntentsTool(
 
     private fun text(args: JsonObject): String =
         args["text"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+
+    private fun internationalDigits(number: String): String? {
+        val telephony = context.getSystemService(TelephonyManager::class.java)
+        val region = (telephony?.simCountryIso?.takeIf { it.isNotEmpty() } ?: Locale.getDefault().country)
+            .uppercase()
+        val e164 = PhoneNumberUtils.formatNumberToE164(number, region)
+            ?: number.trim().takeIf { it.startsWith("+") }
+        return e164?.filter(Char::isDigit)?.takeIf { it.length >= 8 }
+    }
 }

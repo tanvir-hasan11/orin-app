@@ -4,11 +4,14 @@ import android.content.Context
 import com.orin.app.agent.OrinTool
 import com.orin.app.agent.ToolApprovalRequest
 import com.orin.app.data.AuditLogEntity
+import com.orin.app.data.FileHistoryManager
 import com.orin.app.data.KeyStoreManager
 import com.orin.app.data.OrinDao
 import com.orin.app.security.CommandPolicy
 import com.orin.app.security.UrlSafety
 import com.orin.app.security.WorkspacePaths
+import com.orin.app.shell.ShizukuBridge
+import com.orin.app.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -37,9 +40,13 @@ private fun toolSchema(vararg props: Pair<String, String>): JsonObject = buildJs
     }
 }
 
-class FileOpsTool(private val context: Context) : OrinTool {
+class FileOpsTool(
+    private val context: Context,
+    private val keys: KeyStoreManager? = null,
+    private val history: FileHistoryManager? = null,
+) : OrinTool {
     override val name = "file_ops"
-    override val description = "Read, write, or list files in Orin's private workspace ('list', 'read', 'write')."
+    override val description = "Read, write, or list files in Orin's active workspace ('list', 'read', 'write')."
     override val parameters = toolSchema(
         "action" to "One of: 'list' (default), 'read', or 'write'.",
         "path" to "Relative path inside the workspace.",
@@ -47,7 +54,8 @@ class FileOpsTool(private val context: Context) : OrinTool {
     )
 
     private val workspaceRoot: File
-        get() = File(context.filesDir, "workspace").apply { mkdirs() }
+        get() = keys?.let { WorkspaceManager.activeRoot(context, it) }
+            ?: File(context.filesDir, "workspace").apply { mkdirs() }
 
     override fun approval(args: JsonObject): ToolApprovalRequest? {
         val action = args["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "list"
@@ -80,8 +88,10 @@ class FileOpsTool(private val context: Context) : OrinTool {
                     if (path.isBlank()) return@runCatching "Provide a 'path' to write."
                     val file = WorkspacePaths.resolve(workspaceRoot, path)
                     file.parentFile?.mkdirs()
+                    history?.record(workspaceRoot, path, "before_file_ops_write")
                     val content = args["content"]?.jsonPrimitive?.contentOrNull.orEmpty()
                     file.writeText(content)
+                    history?.record(workspaceRoot, path, "after_file_ops_write")
                     "Wrote ${content.length} chars to $path."
                 }
                 else -> {
@@ -103,11 +113,14 @@ class WorkspaceShellTool(
     private val keys: KeyStoreManager,
 ) : OrinTool {
     override val name = "shell"
-    override val description = "Execute a shell command inside Orin's private workspace. Requires user approval."
-    override val parameters = toolSchema("command" to "Shell command to execute.")
+    override val description = "Execute a shell command inside Orin's active workspace (supports access='auto'|'normal'|'shizuku'). Requires user approval."
+    override val parameters = toolSchema(
+        "command" to "Shell command to execute.",
+        "access" to "Optional: 'auto' (default), 'normal', or 'shizuku'.",
+    )
 
     private val workspaceRoot: File
-        get() = File(context.filesDir, "workspace").apply { mkdirs() }
+        get() = WorkspaceManager.activeRoot(context, keys)
 
     override fun approval(args: JsonObject): ToolApprovalRequest? {
         if (!keys.shellEnabled()) return null
@@ -124,63 +137,30 @@ class WorkspaceShellTool(
             return@withContext "Shell is disabled. Enable it in Settings → Advanced."
         }
         val command = args["command"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val requestedAccess = args["access"]?.jsonPrimitive?.contentOrNull?.trim()
         CommandPolicy.rejectionReason(command)?.let { return@withContext it }
 
-        runCatching {
-            val tempDir = File(workspaceRoot, ".tmp").apply { mkdirs() }
-            val builder = ProcessBuilder("sh", "-c", command)
-                .directory(workspaceRoot)
-                .redirectErrorStream(true)
-            builder.environment()["HOME"] = workspaceRoot.absolutePath
-            builder.environment()["TMPDIR"] = tempDir.absolutePath
-
-            val process = builder.start()
-
-            // Drain stdout/stderr concurrently: waiting first can deadlock once
-            // the pipe buffer fills up.
-            val captured = StringBuilder()
-            val drainer = Thread {
-                runCatching { captured.append(readCapped(process.inputStream, 8_000)) }
-            }.apply {
-                isDaemon = true
-                name = "orin-shell-drain"
-                start()
-            }
-
-            val finished = process.waitFor(20, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-                drainer.join(1_000)
-                dao.insertAuditLog(
-                    AuditLogEntity(
-                        UUID.randomUUID().toString(), "shell", "exec", "Timeout: $command", false,
-                    ),
-                )
-                return@withContext "Command timed out after 20s."
-            }
-            drainer.join(2_000)
-            val output = captured.toString()
-            val code = process.exitValue()
-            dao.insertAuditLog(
-                AuditLogEntity(
-                    UUID.randomUUID().toString(), "shell", "exec", "$command (exit $code)", code == 0,
-                ),
-            )
-            "Exit $code:\n${output.ifBlank { "(no output)" }}"
-        }.getOrElse {
-            "Shell error: ${it.message}"
+        val res = ShizukuBridge.exec(
+            context = context,
+            command = command,
+            cwd = workspaceRoot,
+            keys = keys,
+            requestedAccess = requestedAccess,
+            timeoutSeconds = 25,
+        )
+        dao.insertAuditLog(
+            AuditLogEntity(
+                UUID.randomUUID().toString(),
+                "shell",
+                "exec:${res.tier}",
+                "$command (exit ${res.exitCode})",
+                res.exitCode == 0 && !res.timedOut,
+            ),
+        )
+        if (res.timedOut) {
+            return@withContext "Command timed out (${res.tier}):\n${res.output}"
         }
-    }
-
-    private fun readCapped(stream: InputStream, maxBytes: Int): String {
-        val output = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (output.size() < maxBytes) {
-            val read = stream.read(buffer, 0, minOf(buffer.size, maxBytes - output.size()))
-            if (read <= 0) break
-            output.write(buffer, 0, read)
-        }
-        return output.toString(Charsets.UTF_8.name())
+        "Exit ${res.exitCode} (${res.tier}):\n${res.output.ifBlank { "(no output)" }}"
     }
 }
 

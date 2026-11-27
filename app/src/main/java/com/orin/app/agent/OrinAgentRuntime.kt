@@ -5,6 +5,7 @@ import com.orin.app.data.ConversationEntity
 import com.orin.app.data.KeyStoreManager
 import com.orin.app.data.MessageEntity
 import com.orin.app.data.OrinDatabase
+import com.orin.app.llm.LlmAttachment
 import com.orin.app.llm.LlmClient
 import com.orin.app.llm.LlmEvent
 import com.orin.app.llm.LlmResponse
@@ -12,10 +13,14 @@ import com.orin.app.llm.LlmToolCall
 import com.orin.app.llm.LlmToolDeclaration
 import com.orin.app.llm.LlmTurnMessage
 import com.orin.app.llm.OrinLlmClient
+import com.orin.app.security.DuplicateGuard
+import com.orin.app.security.TurnTrust
+import com.orin.app.tools.MemoryPromptContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -38,15 +43,73 @@ class OrinAgentRuntime(
     private val dao = db.dao()
     private val tools = mutableMapOf<String, OrinTool>()
     private val conversationLocks = ConcurrentHashMap<String, Mutex>()
+    private val duplicates = DuplicateGuard()
 
     fun registerTool(tool: OrinTool) {
         tools[tool.name] = tool
     }
 
+    fun toolDeclarations(): List<LlmToolDeclaration> = tools.values.map {
+        LlmToolDeclaration(name = it.name, description = it.description, parameters = it.parameters)
+    }
+
+    fun liveSystemPrompt(): String = systemPrompt(keys.voiceLanguage())
+
+    /**
+     * Executes a single tool call from an external session (such as Gemini Live)
+     * through the same [TurnTrust], [DuplicateGuard], and approval gates.
+     */
+    suspend fun executeManagedTool(
+        call: LlmToolCall,
+        trust: TurnTrust,
+        onApproval: suspend (ToolApprovalRequest) -> Boolean,
+    ): String = executeTool(call, trust, onApproval)
+
     fun observeConversations(): Flow<List<ConversationEntity>> = dao.observeConversations()
 
     fun observeMessages(conversationId: String): Flow<List<MessageEntity>> =
         dao.observeMessages(conversationId)
+
+    /** Persists a zero-latency offline local command exchange in the chat history. */
+    suspend fun recordLocalExchange(
+        conversationId: String,
+        userText: String,
+        replyText: String,
+        toolLabel: String,
+    ) = lockFor(conversationId).withLock {
+        val now = System.currentTimeMillis()
+        val existing = dao.getConversation(conversationId)
+        if (existing == null) {
+            dao.upsertConversation(
+                ConversationEntity(
+                    id = conversationId,
+                    title = userText.trim().take(48).ifEmpty { "Local command" },
+                    updatedAtMs = now,
+                ),
+            )
+        } else {
+            dao.touchConversation(conversationId, now)
+        }
+        dao.insertMessage(
+            MessageEntity(
+                id = UUID.randomUUID().toString(),
+                conversationId = conversationId,
+                isUser = true,
+                text = userText,
+                createdAtMs = now,
+            ),
+        )
+        dao.insertMessage(
+            MessageEntity(
+                id = UUID.randomUUID().toString(),
+                conversationId = conversationId,
+                isUser = false,
+                text = replyText,
+                toolSummary = "• local ($toolLabel): $replyText",
+                createdAtMs = now + 1,
+            ),
+        )
+    }
 
     /**
      * Runs one user turn to completion.
@@ -60,15 +123,66 @@ class OrinAgentRuntime(
     suspend fun runTurn(
         conversationId: String,
         userText: String,
+        attachments: List<LlmAttachment> = emptyList(),
         onUpdate: suspend (String) -> Unit = {},
         onApproval: suspend (ToolApprovalRequest) -> Boolean = { false },
     ): String = lockFor(conversationId).withLock {
-        runTurnLocked(conversationId, userText, onUpdate, onApproval)
+        runTurnLocked(conversationId, userText, attachments, onUpdate, onApproval)
+    }
+
+    /**
+     * Runs an isolated, non-recursive, read-only subagent turn (does not pollute main chat history).
+     */
+    suspend fun runSubagentTurn(taskPrompt: String): String {
+        val provider = keys.activeProviderId()
+        val model = keys.activeModel()
+        val apiKey = keys.getSecret("api_key_$provider")
+            ?: return "No API key configured for $provider."
+
+        val safeReadOnlyTools = setOf(
+            "search_files", "web_search", "web_fetch", "file_history",
+            "phone_calendar", "phone_contacts", "meta_ads", "personal_tracker",
+            "morning_brief", "memory", "git",
+        )
+        val declarations = tools.values
+            .filter { it.name in safeReadOnlyTools }
+            .map { LlmToolDeclaration(it.name, it.description, it.parameters) }
+
+        val transcript = mutableListOf(LlmTurnMessage(role = "user", content = taskPrompt))
+        val trust = TurnTrust().apply { userSpoke() }
+        val system = systemPrompt(keys.voiceLanguage()) +
+            "\nYou are an isolated read-only research subagent. Do not spawn subagents. Gather exact facts and return a concise structured report."
+
+        for (round in 0 until 5) {
+            var response: LlmResponse? = null
+            llm.stream(
+                provider = provider,
+                model = model,
+                apiKey = apiKey,
+                systemPrompt = system,
+                messages = transcript,
+                tools = declarations,
+                baseUrl = if (provider == "custom") keys.customBaseUrl() else null,
+            ).collect { ev -> if (ev is LlmEvent.Completed) response = ev.response }
+            val result = response ?: return "(No subagent response)"
+            if (result.toolCalls.isEmpty()) return result.text.ifBlank { "(No subagent response)" }
+            transcript += LlmTurnMessage(role = "assistant", content = result.text, toolCalls = result.toolCalls)
+            for (call in result.toolCalls) {
+                val out = if (call.name in safeReadOnlyTools) {
+                    executeTool(call, trust, onApproval = { false })
+                } else {
+                    "Tool '${call.name}' is not allowed inside read-only subagent."
+                }
+                transcript += LlmTurnMessage(role = "tool", content = out, toolCallId = call.id, toolName = call.name)
+            }
+        }
+        return "Subagent reached round limit."
     }
 
     private suspend fun runTurnLocked(
         conversationId: String,
         userText: String,
+        attachments: List<LlmAttachment>,
         onUpdate: suspend (String) -> Unit,
         onApproval: suspend (ToolApprovalRequest) -> Boolean,
     ): String {
@@ -90,27 +204,35 @@ class OrinAgentRuntime(
         } else {
             dao.touchConversation(conversationId, now)
         }
+        val attNames = if (attachments.isEmpty()) null else Json.encodeToString(attachments.map { it.name })
         dao.insertMessage(
             MessageEntity(
                 id = UUID.randomUUID().toString(),
                 conversationId = conversationId,
                 isUser = true,
                 text = userText,
+                attachmentsJson = attNames,
                 createdAtMs = now,
             ),
         )
 
-        val transcript = buildTranscript(conversationId)
+        val transcript = ContextCompactor.compactIfNeeded(buildTranscript(conversationId)).toMutableList()
+        if (attachments.isNotEmpty() && transcript.isNotEmpty()) {
+            val lastIdx = transcript.lastIndex
+            transcript[lastIdx] = transcript[lastIdx].copy(attachments = attachments)
+        }
 
         val declarations = tools.values.map {
             LlmToolDeclaration(name = it.name, description = it.description, parameters = it.parameters)
         }
 
-        val systemPrompt = systemPrompt(keys.voiceLanguage())
+        val memoryBlock = MemoryPromptContext.buildBlock(dao)
+        val systemPrompt = systemPrompt(keys.voiceLanguage()) + memoryBlock
 
         val visible = StringBuilder()
         var finalText = ""
         var toolSummary: String? = null
+        val trust = TurnTrust().apply { userSpoke() }
 
         suspend fun publish() {
             onUpdate(visible.toString())
@@ -161,7 +283,7 @@ class OrinAgentRuntime(
 
                 val summaries = mutableListOf<String>()
                 for (call in result.toolCalls) {
-                    val output = executeTool(call, onApproval)
+                    val output = executeTool(call, trust, onApproval)
                     transcript += LlmTurnMessage(
                         role = "tool",
                         content = output,
@@ -255,26 +377,49 @@ class OrinAgentRuntime(
 
     private suspend fun executeTool(
         call: LlmToolCall,
+        trust: TurnTrust,
         onApproval: suspend (ToolApprovalRequest) -> Boolean,
     ): String {
         val tool = tools[call.name] ?: return "Unknown tool '${call.name}'."
+        val argsKey = call.arguments.toString()
+        val sensitive = TurnTrust.isSensitive(call.name, call.arguments)
+        if (sensitive && !duplicates.allow(call.name, argsKey)) {
+            return "Blocked duplicate action: '${call.name}' with these exact arguments was just run. Ask the user before repeating."
+        }
         val request = runCatching { tool.approval(call.arguments) }.getOrNull()
+            ?: if (trust.requiresApprovalAfterExternalRead(call.name, call.arguments)) {
+                ToolApprovalRequest(
+                    toolName = call.name,
+                    title = "Allow ${call.name} after reading external text?",
+                    detail = "External screen, message or web text was read this turn.\n\n${argsKey.take(300)}",
+                )
+            } else {
+                null
+            }
         if (request != null) {
             val allowed = try {
                 onApproval(request)
             } catch (e: CancellationException) {
+                if (sensitive) duplicates.forget(call.name, argsKey)
                 throw e
             } catch (_: Exception) {
                 false
             }
-            if (!allowed) return "User denied this action. Do not retry without asking."
+            if (!allowed) {
+                if (sensitive) duplicates.forget(call.name, argsKey)
+                return "User denied this action. Do not retry without asking."
+            }
         }
         return try {
             tool.execute(call.arguments)
         } catch (e: CancellationException) {
+            if (sensitive) duplicates.forget(call.name, argsKey)
             throw e
         } catch (e: Exception) {
+            if (sensitive) duplicates.forget(call.name, argsKey)
             "Tool '${call.name}' failed: ${(e.message ?: "unknown error").take(300)}"
+        } finally {
+            trust.after(call.name, call.arguments)
         }
     }
 
@@ -311,6 +456,9 @@ class OrinAgentRuntime(
             - Prefer read-only tools first; ask before anything that sends, deletes, writes, launches or costs money.
             - Keep tool output to yourself: summarize what you found instead of dumping it.
             - One app per turn. When you open an app for the user, the user makes the final tap.
+            - Hands-free replies: when notifications show [reply N], use notification_reply action='prepare' first, read the exact confirmation question aloud, and ONLY call action='send' after the user confirms yes.
+            - Screen control: prefer ui_click by element number; use ui_tap_seen only for icon/image buttons not listed by ui_read; use hand_to_user for banking, UPI, OTP, PIN, or payment screens.
+            - Routines: for named routines like "Good morning", call routine action='run' and execute its steps in order.
             """.trimIndent()
         }
     }

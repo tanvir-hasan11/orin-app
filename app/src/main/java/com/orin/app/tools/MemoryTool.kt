@@ -14,11 +14,28 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import java.util.UUID
 
-/** Long-term notes the user explicitly asks Orin to remember. */
+object MemoryPromptContext {
+    suspend fun buildBlock(dao: OrinDao): String {
+        val notes = dao.getMemories().take(8)
+        if (notes.isEmpty()) return ""
+        return buildString {
+            appendLine("\nPersistent user memory facts (reference when relevant):")
+            var chars = 0
+            for (m in notes) {
+                val line = "- [${m.category}] ${m.key}: ${m.value.replace('\n', ' ').take(140)}"
+                if (chars + line.length > 1_200) break
+                appendLine(line)
+                chars += line.length
+            }
+        }.trimEnd()
+    }
+}
+
+/** Long-term categorized notes the user explicitly asks Orin to remember. */
 class MemoryTool(private val dao: OrinDao) : OrinTool {
     override val name = "memory"
     override val description =
-        "Remember a note ('remember'), recall it ('recall'), forget it ('forget'), or list notes ('list'). Secrets are refused."
+        "Remember a categorized note ('remember'), recall it ('recall'), forget it ('forget'), or list notes ('list'). Categories: general, preference, project, marketing, code."
     override val parameters = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
@@ -28,14 +45,17 @@ class MemoryTool(private val dao: OrinDao) : OrinTool {
             }
             putJsonObject("key") { put("type", "string"); put("description", "Short label for the note") }
             putJsonObject("value") { put("type", "string"); put("description", "What to remember") }
+            putJsonObject("category") { put("type", "string"); put("description", "general, preference, project, marketing, or code") }
         }
     }
+
+    private val allowedCategories = setOf("general", "preference", "project", "marketing", "code")
 
     override fun approval(args: JsonObject): ToolApprovalRequest? = when (action(args)) {
         "remember" -> ToolApprovalRequest(
             name,
             "Save this to memory?",
-            "${key(args)}\n\n${value(args).take(400)}",
+            "${key(args)} [${category(args)}]\n\n${value(args).take(400)}",
         )
         "forget" -> ToolApprovalRequest(name, "Forget this note?", key(args))
         else -> null
@@ -51,6 +71,7 @@ class MemoryTool(private val dao: OrinDao) : OrinTool {
     private suspend fun remember(args: JsonObject): String {
         val key = key(args)
         val value = value(args)
+        val cat = category(args)
         if (value.isEmpty()) return "Provide a 'value' to remember."
         MemoryRules.rejectionReason(key, value)?.let { return it }
 
@@ -61,22 +82,23 @@ class MemoryTool(private val dao: OrinDao) : OrinTool {
                 id = id,
                 key = key,
                 value = value,
+                category = cat,
                 createdAtMs = System.currentTimeMillis(),
             ),
         )
-        return if (existing == null) "Remembered: $key" else "Updated memory: $key"
+        return if (existing == null) "Remembered [$cat]: $key" else "Updated memory [$cat]: $key"
     }
 
     private suspend fun recall(args: JsonObject): String {
         val query = key(args)
         if (query.isEmpty()) return "Provide a 'key' or query to recall."
         val exact = dao.findMemory(query)
-        if (exact != null) return "${exact.key}: ${exact.value}"
+        if (exact != null) return "[${exact.category}] ${exact.key}: ${exact.value}"
         val matches = dao.searchMemories(query)
         return if (matches.isEmpty()) {
             "Nothing in memory matches '$query'."
         } else {
-            matches.joinToString("\n") { "• ${it.key}: ${it.value}" }
+            matches.joinToString("\n") { "• [${it.category}] ${it.key}: ${it.value}" }
         }
     }
 
@@ -94,7 +116,7 @@ class MemoryTool(private val dao: OrinDao) : OrinTool {
         return if (notes.isEmpty()) {
             "No saved memories."
         } else {
-            notes.joinToString("\n") { "• ${it.key}: ${it.value.take(120)}" }
+            notes.joinToString("\n") { "• [${it.category}] ${it.key}: ${it.value.take(120)}" }
         }
     }
 
@@ -106,4 +128,7 @@ class MemoryTool(private val dao: OrinDao) : OrinTool {
 
     private fun value(args: JsonObject): String =
         args["value"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+
+    private fun category(args: JsonObject): String =
+        args["category"]?.jsonPrimitive?.contentOrNull?.lowercase()?.takeIf { it in allowedCategories } ?: "general"
 }

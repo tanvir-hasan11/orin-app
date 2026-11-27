@@ -4,9 +4,18 @@ package com.orin.app.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.orin.app.agent.OrinAgentRuntime
+import com.orin.app.control.OrinControlService
+import com.orin.app.data.BackupManager
+import com.orin.app.mcp.McpClientManager
+import com.orin.app.notify.OrinNotificationListener
+import com.orin.app.security.BiometricGate
+import com.orin.app.util.OrinCrashHandler
+import com.orin.app.util.OrinPermissions
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
@@ -71,11 +80,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import com.orin.app.agent.OrinAgentRuntime
-import com.orin.app.control.OrinControlService
-import com.orin.app.notify.OrinNotificationListener
-import com.orin.app.util.OrinCrashHandler
-import com.orin.app.util.OrinPermissions
 import com.orin.app.voice.OrbOverlay
 import com.orin.app.voice.OrinVoice
 import com.orin.app.voice.OrinVoiceService
@@ -88,6 +92,7 @@ fun OrinSettingsScreen(
     runtime: OrinAgentRuntime,
     onBack: () -> Unit,
     onDataCleared: () -> Unit,
+    onThemeChanged: (String) -> Unit = {},
 ) {
     val keys = runtime.keys
     val scheme = MaterialTheme.colorScheme
@@ -102,7 +107,9 @@ fun OrinSettingsScreen(
     var metaAccountInput by remember { mutableStateOf(keys.getSecret("meta_ad_account_id").orEmpty()) }
     var savedBanner by remember { mutableStateOf<String?>(null) }
     var shellEnabled by remember { mutableStateOf(keys.shellEnabled()) }
+    var biometricGateEnabled by remember { mutableStateOf(keys.biometricGateEnabled()) }
     var speakReplies by remember { mutableStateOf(keys.speakReplies()) }
+    var geminiLiveEnabled by remember { mutableStateOf(keys.geminiLiveEnabled()) }
     var voiceLanguage by remember { mutableStateOf(keys.voiceLanguage()) }
     var orbEnabled by remember {
         mutableStateOf(
@@ -116,6 +123,54 @@ fun OrinSettingsScreen(
     var confirmClear by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var showCrash by remember { mutableStateOf(false) }
+    var themeStyle by remember { mutableStateOf(keys.themeStyle()) }
+    var tavilyKey by remember { mutableStateOf(keys.getSecret("search_key_tavily").orEmpty()) }
+    var braveKey by remember { mutableStateOf(keys.getSecret("search_key_brave").orEmpty()) }
+    var serperKey by remember { mutableStateOf(keys.getSecret("search_key_serper").orEmpty()) }
+    val mcpManager = remember(context, keys) { McpClientManager(context, keys) }
+    var mcpServers by remember { mutableStateOf(mcpManager.listServers()) }
+    var showAddMcp by remember { mutableStateOf(false) }
+    var mcpName by remember { mutableStateOf("") }
+    var mcpTransport by remember { mutableStateOf("http") }
+    var mcpTarget by remember { mutableStateOf("") }
+    var mcpAuth by remember { mutableStateOf("") }
+
+    var backupPassword by remember { mutableStateOf("") }
+    var includeSecrets by remember { mutableStateOf(false) }
+    var pendingImportText by remember { mutableStateOf<String?>(null) }
+    var backupMode by remember { mutableStateOf<String?>(null) } // "export" | "import"
+    var backupStatus by remember { mutableStateOf<String?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri != null && backupPassword.length >= 4) {
+            scope.launch(Dispatchers.IO) {
+                val res = runCatching {
+                    val data = BackupManager.exportFromApp(runtime.db.dao(), keys, backupPassword, includeSecrets)
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(data.toByteArray(Charsets.UTF_8)) }
+                    "Encrypted backup saved."
+                }.getOrElse { "Export failed: ${it.message}" }
+                withContext(Dispatchers.Main) { backupStatus = res; backupPassword = "" }
+            }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch(Dispatchers.IO) {
+                val raw = runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                }.getOrNull()
+                withContext(Dispatchers.Main) {
+                    if (raw != null) {
+                        pendingImportText = raw
+                        backupMode = "import"
+                    }
+                }
+            }
+        }
+    }
     val lastCrash = remember(showCrash) { if (showCrash) OrinCrashHandler.lastCrash(context) else null }
     var permissionRefresh by remember { mutableIntStateOf(0) }
 
@@ -353,6 +408,16 @@ fun OrinSettingsScreen(
                         },
                     )
                     SettingsToggleRow(
+                        icon = Icons.Outlined.Mic,
+                        title = "Gemini Live (real-time voice)",
+                        subtitle = "Full-duplex streaming audio with SpeexDSP echo cancellation (uses Gemini API key)",
+                        checked = geminiLiveEnabled,
+                        onCheckedChange = {
+                            geminiLiveEnabled = it
+                            keys.setGeminiLiveEnabled(it)
+                        },
+                    )
+                    SettingsToggleRow(
                         icon = Icons.Outlined.PhoneAndroid,
                         title = "Floating orb",
                         subtitle = if (overlayGranted) {
@@ -413,6 +478,14 @@ fun OrinSettingsScreen(
                         text = "বাংলা ও হিন্দী শোনার জন্য ডিভাইসের ভয়েস প্যাক লাগতে পারে (Settings → Languages & input)। বাংলা প্যাক না থাকলে Orin Hindi/English-এ ফিরে যাবে।",
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onSurfaceVariant,
+                    )
+                    SettingsRow(
+                        icon = Icons.Outlined.PhoneAndroid,
+                        title = "Default digital assistant",
+                        subtitle = "Long-press power or swipe from corner to summon Orin",
+                        onClick = {
+                            context.startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+                        },
                     )
                 }
             }
@@ -485,6 +558,192 @@ fun OrinSettingsScreen(
                     },
                 )
             }
+            item {
+                SettingsToggleRow(
+                    icon = Icons.Outlined.Shield,
+                    title = "Biometric hardware gate",
+                    subtitle = if (biometricGateEnabled) {
+                        "On — ${BiometricGate.availabilityLabel(context)}"
+                    } else {
+                        "Require fingerprint or PIN for SMS, shell, git push & screen actions"
+                    },
+                    checked = biometricGateEnabled,
+                    onCheckedChange = {
+                        biometricGateEnabled = it
+                        keys.setBiometricGateEnabled(it)
+                    },
+                )
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Appearance", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("warm" to "Warm Terracotta", "obsidian" to "Obsidian Cyan").forEach { (id, label) ->
+                            val selected = themeStyle == id
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) scheme.primary else scheme.surfaceContainerLow)
+                                    .border(1.dp, if (selected) scheme.primary else scheme.outlineVariant, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        themeStyle = id
+                                        keys.setThemeStyle(id)
+                                        onThemeChanged(id)
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                            ) {
+                                Text(label, style = MaterialTheme.typography.labelMedium, color = if (selected) Color.White else scheme.onSurface)
+                            }
+                        }
+                    }
+                }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Web Search Providers (Optional)", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                    Text("DuckDuckGo works without keys. Add Tavily/Brave/Serper for higher limits.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                    SettingsField("Tavily API Key", tavilyKey, { tavilyKey = it }, secret = true)
+                    SettingsField("Brave Search API Key", braveKey, { braveKey = it }, secret = true)
+                    SettingsField("Serper API Key", serperKey, { serperKey = it }, secret = true)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(scheme.primary)
+                            .clickable {
+                                keys.putSecret("search_key_tavily", tavilyKey)
+                                keys.putSecret("search_key_brave", braveKey)
+                                keys.putSecret("search_key_serper", serperKey)
+                                savedBanner = "Saved Web Search keys"
+                            }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                    ) {
+                        Text("Save Search Keys", style = MaterialTheme.typography.labelLarge, color = Color.White)
+                    }
+                }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("MCP Servers", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                        Text(
+                            "+ Add",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = scheme.primary,
+                            modifier = Modifier.clickable { showAddMcp = true },
+                        )
+                    }
+                    if (mcpServers.isEmpty()) {
+                        Text("No MCP servers added yet (supports HTTP, SSE, and Stdio).", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                    } else {
+                        mcpServers.forEach { srv ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("${srv.name} (${srv.transport})", style = MaterialTheme.typography.bodyMedium)
+                                    Text(srv.target, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                                }
+                                Text(
+                                    "Remove",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.error,
+                                    modifier = Modifier.clickable {
+                                        mcpManager.removeServer(srv.id)
+                                        mcpServers = mcpManager.listServers()
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Encrypted Backup & Power", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(scheme.primary)
+                                .clickable { backupMode = "export" }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Text("Export Backup", style = MaterialTheme.typography.labelLarge, color = Color.White)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(scheme.surfaceContainerLow)
+                                .border(1.dp, scheme.outlineVariant, RoundedCornerShape(10.dp))
+                                .clickable { importLauncher.launch(arrayOf("*/*")) }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Text("Import Backup", style = MaterialTheme.typography.labelLarge, color = scheme.onSurface)
+                        }
+                    }
+                    if (!backupStatus.isNullOrBlank()) {
+                        Text(backupStatus!!, style = MaterialTheme.typography.labelSmall, color = scheme.primary)
+                    }
+                    val pm = context.getSystemService(PowerManager::class.java)
+                    val ignoringBattery = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                    SettingsRow(
+                        icon = Icons.Outlined.PhoneAndroid,
+                        title = "Background battery exemption",
+                        subtitle = if (ignoringBattery) {
+                            "Unrestricted — Morning Brief & Voice stay reliable"
+                        } else {
+                            "Tap to allow unrestricted background scheduling"
+                        },
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:${context.packageName}"),
+                                    ),
+                                )
+                            }
+                        },
+                    )
+                }
+            }
 
             item { HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f)) }
             item {
@@ -500,7 +759,7 @@ fun OrinSettingsScreen(
                 SettingsRow(
                     icon = Icons.Outlined.Info,
                     title = "About Orin",
-                    subtitle = "Version 1.6.0 · Privacy",
+                    subtitle = "Version 2.0.0 · Privacy",
                     onClick = { showAbout = true },
                 )
             }
@@ -582,6 +841,97 @@ fun OrinSettingsScreen(
                     OrinCrashHandler.clear(context)
                     showCrash = false
                 }) { Text("Delete log") }
+            },
+        )
+    }
+
+    if (showAddMcp) {
+        AlertDialog(
+            onDismissRequest = { showAddMcp = false },
+            title = { Text("Add MCP Server") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsField("Server Name", mcpName, { mcpName = it })
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("http", "sse", "stdio").forEach { t ->
+                            val sel = mcpTransport == t
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (sel) scheme.primary else scheme.surfaceContainerHigh)
+                                    .clickable { mcpTransport = t }
+                                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                            ) {
+                                Text(t.uppercase(), style = MaterialTheme.typography.labelSmall, color = if (sel) Color.White else scheme.onSurface)
+                            }
+                        }
+                    }
+                    SettingsField("URL or Command", mcpTarget, { mcpTarget = it })
+                    SettingsField("Authorization Header (optional)", mcpAuth, { mcpAuth = it }, secret = true)
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = mcpName.isNotBlank() && mcpTarget.isNotBlank(),
+                    onClick = {
+                        mcpManager.addServer(mcpName, mcpTransport, mcpTarget, mcpAuth)
+                        mcpServers = mcpManager.listServers()
+                        mcpName = ""; mcpTarget = ""; mcpAuth = ""
+                        showAddMcp = false
+                    },
+                ) { Text("Add") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddMcp = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (backupMode != null) {
+        val isExport = backupMode == "export"
+        AlertDialog(
+            onDismissRequest = { backupMode = null },
+            title = { Text(if (isExport) "Encrypt Backup" else "Decrypt Backup") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsField("Passphrase (min 4 chars)", backupPassword, { backupPassword = it }, secret = true)
+                    if (isExport) {
+                        SettingsToggleRow(
+                            icon = Icons.Outlined.Key,
+                            title = "Include API keys & tokens",
+                            subtitle = "Encrypted inside AES-GCM-256 envelope",
+                            checked = includeSecrets,
+                            onCheckedChange = { includeSecrets = it },
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = backupPassword.length >= 4,
+                    onClick = {
+                        backupMode = null
+                        if (isExport) {
+                            exportLauncher.launch("orin_backup.orinbackup")
+                        } else {
+                            val raw = pendingImportText
+                            val pass = backupPassword
+                            backupPassword = ""
+                            pendingImportText = null
+                            if (raw != null) {
+                                scope.launch(Dispatchers.IO) {
+                                    val res = runCatching {
+                                        BackupManager.importIntoApp(runtime.db.dao(), keys, raw, pass)
+                                    }.getOrElse { "Import failed: ${it.message}" }
+                                    withContext(Dispatchers.Main) { backupStatus = res }
+                                }
+                            }
+                        }
+                    },
+                ) { Text(if (isExport) "Choose File" else "Restore") }
+            },
+            dismissButton = {
+                TextButton(onClick = { backupMode = null; pendingImportText = null }) { Text("Cancel") }
             },
         )
     }

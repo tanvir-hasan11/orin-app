@@ -22,6 +22,17 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
+# Native JNI & Shizuku service
+-keep class com.orin.app.voice.EchoCanceller {
+    native <methods>;
+    *;
+}
+-keep class com.orin.app.shell.OrinUserService { *; }
+-keep class com.orin.app.IOrinShellService** { *; }
+-keep class rikka.shizuku.** { *; }
+-dontwarn rikka.shizuku.**
+-dontwarn io.github.rosemoe.sora.**
+
 # Tink (pulled in by androidx.security.crypto) references compile-time-only
 # error-prone annotations that are not shipped in the APK.
 -dontwarn com.google.errorprone.annotations.**

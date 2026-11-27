@@ -14,6 +14,8 @@ object NotificationTriage {
         val timestampMs: Long,
         val isCode: Boolean,
         val hasLink: Boolean,
+        val group: Boolean = false,
+        val replyId: Int? = null,
     )
 
     private val codePattern = Regex("""\b(\d{4,6})\b""")
@@ -41,7 +43,8 @@ object NotificationTriage {
             val cleaned = linkPattern.replace(safeText, "[link hidden]")
                 .replace('\n', ' ')
                 .take(140)
-            lines.add("• ${item.sender}: $cleaned")
+            val replyTag = item.replyId?.let { " [reply $it]" }.orEmpty()
+            lines.add("• ${item.sender}: $cleaned$replyTag")
         }
 
         return buildString {

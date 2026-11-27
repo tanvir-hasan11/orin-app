@@ -36,7 +36,11 @@ class OrinVoiceService : Service() {
             orb = OrbOverlay(
                 context = this,
                 onTap = { launch(OrinVoice.ACTION_VOICE) },
-                onDoubleTap = { launch(OrinVoice.ACTION_TYPE) },
+                onDoubleTap = {
+                    OrbTypeBox.show(this) { typed ->
+                        launch(OrinVoice.ACTION_TYPE, typed)
+                    }
+                },
             ).also { it.show() }
         }
     }
@@ -52,7 +56,11 @@ class OrinVoiceService : Service() {
                         orb = OrbOverlay(
                             context = this,
                             onTap = { launch(OrinVoice.ACTION_VOICE) },
-                            onDoubleTap = { launch(OrinVoice.ACTION_TYPE) },
+                            onDoubleTap = {
+                                OrbTypeBox.show(this) { typed ->
+                                    launch(OrinVoice.ACTION_TYPE, typed)
+                                }
+                            },
                         )
                     }
                     orb?.show()
@@ -65,15 +73,17 @@ class OrinVoiceService : Service() {
     }
 
     override fun onDestroy() {
+        OrbTypeBox.hide(this)
         orb?.hide()
         orb = null
         super.onDestroy()
     }
 
-    private fun launch(action: String) {
+    private fun launch(action: String, prompt: String? = null) {
         try {
             val intent = Intent(this, MainActivity::class.java).apply {
                 this.action = action
+                if (!prompt.isNullOrBlank()) putExtra(OrinVoice.EXTRA_PROMPT, prompt)
                 addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
                         Intent.FLAG_ACTIVITY_SINGLE_TOP or

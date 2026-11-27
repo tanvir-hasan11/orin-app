@@ -56,8 +56,9 @@ android {
         applicationId = "com.orin.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.6.0"
+        versionCode = 9
+        versionName = "2.0.0"
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -104,6 +105,15 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
+    }
+
+    ndkVersion = "27.0.12077973"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     testOptions {
@@ -171,7 +181,17 @@ dependencies {
     ksp(libs.room.compiler)
 
     implementation(libs.security.crypto)
+    implementation(libs.fragment.ktx)
+    implementation(libs.biometric)
+    implementation(libs.work.runtime.ktx)
+    implementation(libs.documentfile)
+    implementation(libs.webkit)
+    implementation(libs.browser)
+    implementation(libs.sora.editor)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     implementation(libs.okhttp)
+    implementation(libs.okhttp.sse)
     implementation(libs.vosk.android)
 
     debugImplementation(libs.compose.ui.tooling)

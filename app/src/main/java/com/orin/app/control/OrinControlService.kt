@@ -2,32 +2,43 @@ package com.orin.app.control
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.GestureDescription
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
-/** A numbered snapshot of the interactive elements on the current screen. */
+/** A numbered snapshot of visible text and interactive elements on the current screen. */
 data class UiNode(
     val index: Int,
+    val role: String,
     val text: String,
     val label: String,
     val className: String,
     val resourceId: String,
     val clickable: Boolean,
     val editable: Boolean,
+    val value: String = "",
 ) {
     val display: String
-        get() = text.ifBlank { label }.ifBlank { resourceId.substringAfterLast('/') }
+        get() = label.ifBlank { text }.ifBlank { resourceId.substringAfterLast('/') }
             .ifBlank { className.substringAfterLast('.') }
 }
 
-/** Opt-in accessibility backend for the "use any app" tool. */
+/** Opt-in accessibility backend for screen reading, clicking, typing, and tap-by-sight. */
 class OrinControlService : AccessibilityService() {
 
-    private var lastNodes: List<AccessibilityNodeInfo> = emptyList()
+    @Volatile
+    private var lastNodes: Map<Int, AccessibilityNodeInfo> = emptyMap()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -38,55 +49,94 @@ class OrinControlService : AccessibilityService() {
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = refresh()
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
 
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        lastNodes = emptyMap()
         super.onDestroy()
     }
 
-    fun isEnabled(): Boolean = try {
-        val enabled = android.provider.Settings.Secure.getString(
-            contentResolver,
-            android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-        ).orEmpty()
-        enabled.contains("$packageName/${javaClass.name}")
-    } catch (_: Exception) {
-        false
-    }
-
-    /** Refreshes and returns a numbered list of interactive elements. */
-    fun snapshot(limit: Int = 60): List<UiNode> {
-        refresh(limit)
-        return lastNodes.mapIndexed { index, node ->
-            UiNode(
-                index = index,
-                text = node.text?.toString().orEmpty().trim(),
-                label = node.contentDescription?.toString().orEmpty().trim(),
-                className = node.className?.toString().orEmpty(),
-                resourceId = node.viewIdResourceName.orEmpty(),
-                clickable = node.isClickable,
-                editable = node.isEditable,
-            )
-        }
-    }
+    fun isEnabled(): Boolean = isEnabled(this)
 
     fun currentPackage(): String? = rootInActiveWindow?.packageName?.toString()
 
-    fun click(index: Int): String {
-        val node = nodeAt(index) ?: return "No element numbered $index. Call ui_read first."
-        return if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            "Tapped element $index."
-        } else {
-            "Element $index could not be tapped."
+    /**
+     * Reads the active window into a numbered list of buttons, fields, switches, and visible text.
+     * Blocked apps return an empty list.
+     */
+    fun snapshot(limit: Int = MAX_ELEMENTS): List<UiNode> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val pkg = root.packageName?.toString().orEmpty()
+        if (ControlRules.isBlocked(pkg)) {
+            lastNodes = emptyMap()
+            return emptyList()
         }
+        val elements = mutableListOf<UiNode>()
+        val nodes = mutableMapOf<Int, AccessibilityNodeInfo>()
+
+        fun visit(node: AccessibilityNodeInfo, insideTappable: Boolean) {
+            if (!node.isVisibleToUser || elements.size >= limit) return
+            val tappable = node.isClickable || node.isEditable || node.isCheckable
+            val own = ownLabel(node)
+            val include = when {
+                tappable -> true
+                own.isNotEmpty() && !insideTappable -> true
+                else -> false
+            }
+            if (include && elements.size < limit) {
+                val label = own.ifEmpty { childText(node) }
+                    .ifEmpty { node.viewIdResourceName?.substringAfterLast('/').orEmpty() }
+                if (label.isNotEmpty() || node.isEditable) {
+                    val idx = elements.size + 1
+                    elements += UiNode(
+                        index = idx,
+                        role = role(node),
+                        text = node.text?.toString().orEmpty().trim(),
+                        label = label,
+                        className = node.className?.toString().orEmpty(),
+                        resourceId = node.viewIdResourceName.orEmpty(),
+                        clickable = node.isClickable,
+                        editable = node.isEditable,
+                        value = if (node.isEditable) node.text?.toString().orEmpty() else "",
+                    )
+                    nodes[idx] = node
+                }
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { visit(it, insideTappable || tappable) }
+            }
+        }
+
+        visit(root, false)
+        lastNodes = nodes
+        return elements
+    }
+
+    fun node(index: Int): AccessibilityNodeInfo? = lastNodes[index]?.takeIf { it.refresh() }
+
+    fun labelOf(node: AccessibilityNodeInfo): String = ownLabel(node).ifEmpty { childText(node) }
+
+    fun click(index: Int): String {
+        val node = node(index) ?: return "No element numbered $index. Call ui_read first."
+        return if (clickNode(node)) "Tapped element $index." else "Element $index could not be tapped."
+    }
+
+    fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        var target: AccessibilityNodeInfo? = node
+        while (target != null && !target.isClickable) target = target.parent
+        if (target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return true
+        val bounds = Rect().also(node::getBoundsInScreen)
+        return tapAt(bounds.exactCenterX(), bounds.exactCenterY())
     }
 
     fun type(index: Int, text: String): String {
-        val node = nodeAt(index) ?: return "No element numbered $index. Call ui_read first."
+        val node = (if (index > 0) node(index) else focusedField())
+            ?: return "No element numbered $index. Call ui_read first."
         if (!node.isEditable) return "Element $index is not a text field."
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val arguments = Bundle().apply {
             putCharSequence(ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
@@ -97,56 +147,131 @@ class OrinControlService : AccessibilityService() {
         }
     }
 
-    fun scrollForward(): String = scroll(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+    fun focusedField(): AccessibilityNodeInfo? =
+        rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
 
-    fun scrollBackward(): String = scroll(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+    fun scrollForward(): String = scroll(down = true)
 
-    private fun scroll(action: Int): String {
-        val target = lastNodes.firstOrNull { it.isScrollable } ?: rootInActiveWindow
-        return if (target?.performAction(action) == true) "Scrolled." else "Nothing scrollable here."
+    fun scrollBackward(): String = scroll(down = false)
+
+    private fun scroll(down: Boolean): String {
+        val root = rootInActiveWindow ?: return "No active screen."
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = 0
+        fun visit(node: AccessibilityNodeInfo) {
+            if (node.isScrollable && node.isVisibleToUser) {
+                val r = Rect().also(node::getBoundsInScreen)
+                if (r.width() * r.height() > bestArea) {
+                    best = node
+                    bestArea = r.width() * r.height()
+                }
+            }
+            for (i in 0 until node.childCount) node.getChild(i)?.let(::visit)
+        }
+        visit(root)
+        val action = if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        if (best?.performAction(action) == true) return "Scrolled."
+        val metrics = resources.displayMetrics
+        val x = metrics.widthPixels / 2f
+        val (from, to) = if (down) metrics.heightPixels * 0.7f to metrics.heightPixels * 0.3f else metrics.heightPixels * 0.3f to metrics.heightPixels * 0.7f
+        return if (swipe(x, from, x, to)) "Scrolled." else "Nothing scrollable here."
     }
 
-    fun globalAction(action: Int): String {
-        return if (performGlobalAction(action)) "Done." else "That action isn't available."
+    fun globalAction(action: Int): String =
+        if (performGlobalAction(action)) "Done." else "That action isn't available."
+
+    /** Software bitmap screenshot on Android 11+; returns null for protected windows or API < 30. */
+    suspend fun screenshot(): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return suspendCancellableCoroutine { done ->
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(result: ScreenshotResult) {
+                        val shot = result.hardwareBuffer.use { buffer ->
+                            Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                        }
+                        done.resume(shot)
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        done.resume(null)
+                    }
+                },
+            )
+        }
     }
 
-    private fun nodeAt(index: Int): AccessibilityNodeInfo? =
-        if (index in lastNodes.indices) lastNodes[index] else null
-
-    private fun refresh(limit: Int = 60) {
-        lastNodes.forEach { runCatching { it.recycle() } }
-        val roots = buildList {
-            rootInActiveWindow?.let { add(it) }
-            windows.mapNotNull { it.root }.forEach { add(it) }
-        }.distinctBy { it.hashCode() }
-
-        val collected = mutableListOf<AccessibilityNodeInfo>()
-        for (root in roots) {
-            collect(root, collected, limit, depth = 0)
-            if (collected.size >= limit) break
+    fun nodeAt(x: Float, y: Float): AccessibilityNodeInfo? {
+        val point = Rect()
+        fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (!node.isVisibleToUser) return null
+            node.getBoundsInScreen(point)
+            if (!point.contains(x.toInt(), y.toInt())) return null
+            for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let(::visit)?.let { return it }
+            return node
         }
-        lastNodes = collected
+        return windows.sortedByDescending { it.layer }.firstNotNullOfOrNull { it.root?.let(::visit) }
     }
 
-    private fun collect(
-        node: AccessibilityNodeInfo?,
-        out: MutableList<AccessibilityNodeInfo>,
-        limit: Int,
-        depth: Int,
-    ) {
-        if (node == null || depth > 18 || out.size >= limit) return
-        val interesting = node.isClickable || node.isEditable || node.isScrollable ||
-            !node.text?.toString().isNullOrBlank() ||
-            !node.contentDescription?.toString().isNullOrBlank()
-        if (interesting && (node.isClickable || node.isEditable || node.isScrollable)) {
-            out += node
+    fun tapAt(x: Float, y: Float): Boolean = swipe(x, y, x, y, durationMs = 60L)
+
+    fun findFirst(test: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (!node.isVisibleToUser) return null
+            if (test(node)) return node
+            for (i in 0 until node.childCount) node.getChild(i)?.let(::visit)?.let { return it }
+            return null
         }
-        for (i in 0 until node.childCount) {
-            collect(node.getChild(i), out, limit, depth + 1)
+        return visit(root)
+    }
+
+    suspend fun waitFor(packageName: String, timeoutMs: Long): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            if (currentPackage() == packageName) return true
+            delay(250)
         }
+        return false
+    }
+
+    private fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300L): Boolean {
+        val path = Path().apply {
+            moveTo(x1, y1)
+            lineTo(x2, y2)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        return dispatchGesture(gesture, null, null)
+    }
+
+    private fun ownLabel(node: AccessibilityNodeInfo): String =
+        (node.text ?: node.contentDescription ?: node.hintText)?.toString()?.trim().orEmpty()
+
+    private fun childText(node: AccessibilityNodeInfo): String {
+        val parts = mutableListOf<String>()
+        fun visit(n: AccessibilityNodeInfo) {
+            if (parts.size >= 3) return
+            ownLabel(n).takeIf { it.isNotEmpty() && n !== node }?.let { parts += it }
+            for (i in 0 until n.childCount) n.getChild(i)?.let(::visit)
+        }
+        visit(node)
+        return parts.joinToString(" · ")
+    }
+
+    private fun role(node: AccessibilityNodeInfo): String = when {
+        node.isEditable -> "field"
+        node.isCheckable -> if (node.isChecked) "switch on" else "switch off"
+        node.isClickable -> "button"
+        else -> "text"
     }
 
     companion object {
+        const val MAX_ELEMENTS = 60
+
         @Volatile
         var instance: OrinControlService? = null
             private set
